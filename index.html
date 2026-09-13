@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
+  <meta name="theme-color" content="#4F6EF7" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <title>记账本</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" href="icons/icon-192.png" type="image/png" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <link rel="stylesheet" href="css/style.css" />
+  <script src="vendor/echarts.min.js"></script>
+</head>
+<body>
+  <div id="app">
+    <main id="view" class="view"></main>
+
+    <button id="fab" class="fab" aria-label="记一笔">＋</button>
+
+    <nav id="tabbar" class="tabbar">
+      <button class="tab is-active" data-tab="home">
+        <span class="tab-ico">🏠</span><span class="tab-label">首页</span>
+      </button>
+      <button class="tab" data-tab="list">
+        <span class="tab-ico">📋</span><span class="tab-label">明细</span>
+      </button>
+      <button class="tab" data-tab="stats">
+        <span class="tab-ico">📊</span><span class="tab-label">统计</span>
+      </button>
+      <button class="tab" data-tab="settings">
+        <span class="tab-ico">⚙️</span><span class="tab-label">设置</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- 记一笔 / 编辑 底部弹层 -->
+  <div id="sheet-backdrop" class="sheet-backdrop hidden"></div>
+  <div id="sheet" class="sheet hidden">
+    <div class="sheet-handle"></div>
+    <div class="sheet-head">
+      <button id="sheet-cancel" class="link-btn">取消</button>
+      <div class="sheet-title" id="sheet-title">记一笔</div>
+      <button id="sheet-save" class="primary-btn">保存</button>
+    </div>
+
+    <div class="type-toggle">
+      <button id="type-expense" class="type-btn is-active" data-type="expense">支出</button>
+      <button id="type-income" class="type-btn" data-type="income">收入</button>
+    </div>
+
+    <div class="amount-box">
+      <span class="amount-symbol">¥</span>
+      <input id="sheet-amount" class="amount-input" type="text" inputmode="decimal" placeholder="0.00" autocomplete="off" />
+    </div>
+
+    <div class="sheet-section">
+      <div class="sheet-label">分类</div>
+      <div id="sheet-cats" class="cat-area"></div>
+    </div>
+
+    <div class="sheet-section">
+      <div class="sheet-label">账户</div>
+      <div id="sheet-accounts" class="chip-row"></div>
+    </div>
+
+    <div class="sheet-section sheet-meta">
+      <label class="meta-item">
+        <span class="meta-label">日期</span>
+        <input id="sheet-date" type="date" class="meta-input" />
+      </label>
+      <label class="meta-item meta-note">
+        <span class="meta-label">备注</span>
+        <input id="sheet-note" type="text" class="meta-input" placeholder="选填" autocomplete="off" />
+      </label>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

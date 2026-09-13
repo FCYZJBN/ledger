@@ -1,0 +1,121 @@
+// 端到端冒烟测试：启动无头 Chrome + CDP，验证「渲染 → 记一笔 → 统计图表」全链路
+import { spawn } from 'node:child_process';
+
+const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
+const URL = 'http://localhost:8001/';
+const PORT = 9333;
+const PROFILE = 'C:/Users/FCYZJBN/AppData/Local/Temp/ledger-chrome-' + Date.now();
+
+const chrome = spawn(CHROME, [
+  '--headless=new', '--disable-gpu', '--no-sandbox',
+  `--remote-debugging-port=${PORT}`,
+  `--user-data-dir=${PROFILE}`,
+  URL,
+], { stdio: 'ignore' });
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function getWsUrl() {
+  for (let i = 0; i < 30; i++) {
+    try {
+      const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
+      const page = list.find((t) => t.type === 'page');
+      if (page) return page.webSocketDebuggerUrl;
+    } catch {}
+    await sleep(300);
+  }
+  throw new Error('no CDP target');
+}
+
+let results = [];
+
+async function main() {
+  const ws = new WebSocket(await getWsUrl());
+  await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
+
+  let id = 0;
+  const pending = new Map();
+  const exceptions = [];
+  const send = (method, params = {}) => new Promise((res) => {
+    const mid = ++id;
+    pending.set(mid, res);
+    ws.send(JSON.stringify({ id: mid, method, params }));
+  });
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg.result); pending.delete(msg.id); }
+    else if (msg.method === 'Runtime.exceptionThrown') {
+      exceptions.push((msg.params.exceptionDetails.exception?.description) || msg.params.exceptionDetails.text);
+    }
+  };
+  const evalJs = async (expr) => {
+    const r = await send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true });
+    return r.result?.value;
+  };
+
+  await send('Runtime.enable');
+  await sleep(2000);
+
+  // 1. 首页渲染
+  const home = JSON.parse(await evalJs(`JSON.stringify({
+    viewLen: (document.querySelector('#view')||{}).innerHTML?.length || 0,
+    hasOverview: !!document.querySelector('.overview-card'),
+    hasBudget: !!document.querySelector('.budget-card'),
+    emptyHint: (document.querySelector('#view')||{}).textContent?.includes('还没有记录') || false,
+  })`));
+  results.push(['首页渲染', home.viewLen > 0 && home.hasOverview && home.hasBudget && home.emptyHint, home]);
+
+  // 2. 记一笔
+  await evalJs(`document.querySelector('#fab').click()`);
+  await sleep(400);
+  const sheetOpen = await evalJs(`!document.querySelector('#sheet').classList.contains('hidden')`);
+  await evalJs(`(() => { const i = document.querySelector('#sheet-amount'); i.value = '25.50'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await evalJs(`document.querySelector('.cat-parent').click()`); // 展开第一个大类
+  await sleep(200);
+  const childShown = await evalJs(`!!document.querySelector('.cat-child')`);
+  await evalJs(`document.querySelector('.cat-child').click()`); // 选子类
+  await sleep(150);
+  await evalJs(`document.querySelector('#sheet-save').click()`);
+  await sleep(600);
+
+  const saved = JSON.parse(await evalJs(`JSON.stringify({
+    sheetHidden: document.querySelector('#sheet').classList.contains('hidden'),
+    txnCount: document.querySelectorAll('.txn').length,
+    has25: document.querySelector('#view').textContent.includes('25.50'),
+  })`));
+  results.push(['记一笔保存', sheetOpen && childShown && saved.sheetHidden && saved.txnCount === 1 && saved.has25, saved]);
+
+  // 3. 切到明细，确认分组 + 删除按钮
+  await evalJs(`[...document.querySelectorAll('.tab')].find(b => b.dataset.tab === 'list').click()`);
+  await sleep(300);
+  const list = JSON.parse(await evalJs(`JSON.stringify({
+    dayGroups: document.querySelectorAll('.day-group').length,
+    copyBtn: !!document.querySelector('[data-action="copy-txn"]'),
+    delBtn: !!document.querySelector('[data-action="delete-txn"]'),
+  })`));
+  results.push(['明细列表', list.dayGroups === 1 && list.copyBtn && list.delBtn, list]);
+
+  // 4. 统计页图表
+  await evalJs(`[...document.querySelectorAll('.tab')].find(b => b.dataset.tab === 'stats').click()`);
+  await sleep(900);
+  const stats = JSON.parse(await evalJs(`JSON.stringify({
+    cards: document.querySelectorAll('.stat-card').length,
+    pieCanvas: !!document.querySelector('#pie-chart canvas'),
+    trendCanvas: !!document.querySelector('#trend-chart canvas'),
+  })`));
+  results.push(['统计图表', stats.cards === 4 && stats.pieCanvas && stats.trendCanvas, stats]);
+
+  console.log('EXCEPTIONS:', exceptions.length ? JSON.stringify(exceptions, null, 2) : 'none');
+  let ok = true;
+  for (const [name, pass, detail] of results) {
+    ok = ok && pass;
+    console.log((pass ? 'PASS' : 'FAIL') + '  ' + name + '  ' + JSON.stringify(detail));
+  }
+  console.log(ok ? '\n✅ 全部通过' : '\n❌ 存在失败项');
+  ws.close();
+  process.exitCode = ok ? 0 : 1;
+}
+
+main()
+  .then(() => { chrome.kill(); })
+  .catch((e) => { console.error('SMOKE FAIL:', e); chrome.kill(); process.exit(1); });
