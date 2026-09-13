@@ -1,5 +1,6 @@
 // 图表封装：基于 ECharts（CDN 引入，离线时由 Service Worker 缓存）
 // 所有函数都做降级：图表库未加载时显示占位提示，不报错
+import { escapeHtml } from './util.js';
 
 function ensureChart(el) {
   if (typeof echarts === 'undefined') {
@@ -28,7 +29,7 @@ export function renderCategoryPie(el, items) {
   chart.setOption({
     tooltip: {
       trigger: 'item',
-      formatter: (p) => `${p.name}<br/>${fmtYuan(p.value)}（${p.percent}%）`,
+      formatter: (p) => `${escapeHtml(p.name)}<br/>${fmtYuan(p.value)}（${p.percent}%）`,
     },
     legend: { bottom: 0, type: 'scroll', textStyle: { fontSize: 11 } },
     series: [
