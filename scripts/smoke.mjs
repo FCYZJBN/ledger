@@ -105,6 +105,38 @@ async function main() {
   })`));
   results.push(['统计图表', stats.cards === 4 && stats.pieCanvas && stats.trendCanvas, stats]);
 
+  // 5. 设置 → 关于/使用帮助页
+  await evalJs(`[...document.querySelectorAll('.tab')].find(b => b.dataset.tab === 'settings').click()`);
+  await sleep(300);
+  await evalJs(`document.querySelector('[data-action="open-about"]').click()`);
+  await sleep(300);
+  const about = JSON.parse(await evalJs(`JSON.stringify({
+    hasHero: !!document.querySelector('.about-hero'),
+    hasTitle: document.querySelector('#view').textContent.includes('使用帮助'),
+    backBtn: !!document.querySelector('[data-action="back-settings"]'),
+  })`));
+  results.push(['关于/帮助页', about.hasHero && about.hasTitle && about.backBtn, about]);
+
+  // 6. 分类管理 → 新增大类 → 图标点选面板
+  await evalJs(`document.querySelector('[data-action="back-settings"]').click()`);
+  await sleep(200);
+  await evalJs(`document.querySelector('[data-action="manage-cats"]').click()`);
+  await sleep(200);
+  await evalJs(`document.querySelector('[data-action="add-parent"][data-type="expense"]').click()`);
+  await sleep(300);
+  const modalOpen = await evalJs(`!document.querySelector('#modal').classList.contains('hidden')`);
+  const hasPreview = await evalJs(`!!document.querySelector('#c-icon-preview')`);
+  await evalJs(`document.querySelector('#c-icon-preview').click()`);
+  await sleep(300);
+  const pickerOpen = await evalJs(`!document.querySelector('#icon-picker').classList.contains('hidden')`);
+  const gridCount = await evalJs(`document.querySelectorAll('#icon-picker-grid .ip-item').length`);
+  const firstEmoji = await evalJs(`document.querySelector('#icon-picker-grid .ip-item').dataset.emoji`);
+  await evalJs(`document.querySelector('#icon-picker-grid .ip-item').click()`);
+  await sleep(200);
+  const pickerClosed = await evalJs(`document.querySelector('#icon-picker').classList.contains('hidden')`);
+  const previewEmoji = await evalJs(`document.querySelector('#c-icon-preview .ip-emoji').textContent`);
+  results.push(['图标点选面板', modalOpen && hasPreview && pickerOpen && gridCount > 10 && pickerClosed && firstEmoji === previewEmoji, { modalOpen, hasPreview, pickerOpen, gridCount, firstEmoji, previewEmoji }]);
+
   console.log('EXCEPTIONS:', exceptions.length ? JSON.stringify(exceptions, null, 2) : 'none');
   let ok = true;
   for (const [name, pass, detail] of results) {

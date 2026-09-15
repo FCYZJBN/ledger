@@ -361,6 +361,7 @@ function renderStatsHtml(d) {
 function renderSettings() {
   if (state.subpage === 'cats') return renderCategoryManager();
   if (state.subpage === 'accts') return renderAccountManager();
+  if (state.subpage === 'about') return renderAbout();
   return renderSettingsHome();
 }
 
@@ -394,8 +395,43 @@ function renderSettingsHome() {
     </div>
     <div class="set-group">
       <div class="set-title">关于</div>
-      <div class="set-card"><div class="set-row plain">记账本 v1.0 · 数据仅存本机浏览器</div></div>
+      <div class="set-card">
+        <button class="set-row arrow" data-action="open-about">❓ 关于 / 使用帮助 <span>›</span></button>
+      </div>
     </div>
+  </div>`;
+}
+
+function renderAbout() {
+  return `
+  <div class="page manage-page about-page">
+    <div class="page-head"><button class="link-btn" data-action="back-settings">‹ 返回</button><span class="page-title">关于 / 使用帮助</span></div>
+
+    <div class="about-hero">
+      <div class="about-logo">📒</div>
+      <div class="about-name">记账本</div>
+      <div class="about-slogan">本地记账 · 单式流水 · 收支清晰 · 数据私有</div>
+    </div>
+
+    <div class="set-group"><div class="set-title">这是什么</div><div class="set-card">
+      <div class="about-block">一个跑在手机浏览器里的<b>本地记账 App</b>，收支都记、两级分类、预算红线、图表报表。数据只存在你的手机里，<b>不上传任何服务器</b>。</div>
+    </div></div>
+
+    <div class="set-group"><div class="set-title">快速上手</div><div class="set-card">
+      <div class="about-block"><b>1.</b> 点底部 ＋，输入金额、选分类、选账户，保存即可（默认今天）。<br><b>2.</b> 首页看本月收支与预算，明细按日期回看，统计看图表。<br><b>3.</b> 设置里可自定义分类、账户，设每月预算帽。</div>
+    </div></div>
+
+    <div class="set-group"><div class="set-title">数据安全</div><div class="set-card">
+      <div class="about-block">所有数据存在<b>本机浏览器</b>（IndexedDB），不会上传云端。请定期到「设置 → 导出备份（JSON）」保存；<b>换手机或清理浏览器数据前务必先备份</b>，再到新设备导入即可恢复。</div>
+    </div></div>
+
+    <div class="set-group"><div class="set-title">小技巧</div><div class="set-card">
+      <div class="about-block">• 添加到主屏幕：浏览器菜单 →「添加到主屏幕」，之后像 App 一样全屏、离线使用。<br>• 预算帽只提醒不拦截：用掉 80% 进度条变黄、超支变红。<br>• 分类支持两级：大类下还能建子类，图标一键点选、也可自定义。</div>
+    </div></div>
+
+    <div class="set-group"><div class="set-title">版本</div><div class="set-card">
+      <div class="set-row plain">记账本 v1.0 · 开源（MIT） · 数据仅存本机</div>
+    </div></div>
   </div>`;
 }
 
@@ -612,6 +648,94 @@ function toast(msg) {
   toastTimer = setTimeout(() => t.classList.add('hidden'), 1800);
 }
 
+// ================= 图标点选 =================
+const EMOJI_SETS = {
+  expense: [
+    { label: '餐饮', icons: ['🍜', '🍚', '🍔', '🍟', '🍱', '🥡', '🍰', '☕', '🧋', '🍺'] },
+    { label: '交通', icons: ['🚌', '🚇', '🚗', '🚕', '🚲', '✈️', '🚄', '⛽'] },
+    { label: '购物', icons: ['🛍️', '👗', '👟', '👜', '💄', '🎁', '📱', '💻'] },
+    { label: '居住', icons: ['🏠', '💡', '💧', '📦', '🧻', '🔧', '🧺'] },
+    { label: '娱乐', icons: ['🎮', '🎬', '🎵', '📚', '⚽', '🎤', '🎨'] },
+    { label: '医疗', icons: ['💊', '🏥', '🩺', '💉', '😷'] },
+    { label: '教育', icons: ['📖', '✏️', '🎓', '📐', '💼'] },
+    { label: '人情', icons: ['🧧', '❤️', '💐', '🍷', '🎁'] },
+    { label: '其他', icons: ['🐱', '🏃', '📦', '🧾', '🔧'] },
+  ],
+  income: [
+    { label: '收入', icons: ['💰', '💵', '💳', '🧧', '📈', '💼', '🏦', '🎁', '💹', '📊'] },
+  ],
+  account: [
+    { label: '账户', icons: ['💳', '💰', '💵', '🏦', '📱', '💲', '🧧', '💎', '📊', '🪙'] },
+  ],
+};
+
+let iconPickerTarget = null; // 正在选图标的输入框 id：'c-icon' | 'a-icon'
+
+// 图标行：隐藏 input 存值，可见按钮展示预览并触发点选
+function iconRowHtml(id, context, icon, placeholder) {
+  const v = icon || placeholder;
+  return `<div class="form-row"><label>图标</label>
+    <button class="icon-preview" id="${id}-preview" data-target="${id}" data-context="${context}">
+      <span class="ip-emoji">${escapeHtml(v)}</span><span class="ip-hint">点选</span>
+    </button>
+    <input id="${id}" type="hidden" value="${escapeHtml(v)}">
+  </div>`;
+}
+
+function updateIconPreview(targetId) {
+  const btn = $('#' + targetId + '-preview');
+  if (!btn) return;
+  btn.querySelector('.ip-emoji').textContent = $('#' + targetId).value.trim() || '📦';
+}
+
+function openIconPicker(targetId, context) {
+  iconPickerTarget = targetId;
+  const groups = EMOJI_SETS[context] || EMOJI_SETS.account;
+  $('#icon-picker-custom').value = $('#' + targetId).value.trim();
+  $('#icon-picker-grid').innerHTML = groups.map((g) => `
+    <div class="ip-group">
+      <div class="ip-group-label">${g.label}</div>
+      <div class="ip-grid">${g.icons.map((ic) => `<button class="ip-item" data-emoji="${ic}">${ic}</button>`).join('')}</div>
+    </div>`).join('');
+  $('#icon-picker').classList.remove('hidden');
+  $('#icon-picker-backdrop').classList.remove('hidden');
+}
+
+function closeIconPicker() {
+  $('#icon-picker').classList.add('hidden');
+  $('#icon-picker-backdrop').classList.add('hidden');
+  iconPickerTarget = null;
+}
+
+function selectIcon(emoji) {
+  if (!iconPickerTarget) return;
+  $('#' + iconPickerTarget).value = emoji;
+  updateIconPreview(iconPickerTarget);
+  closeIconPicker();
+}
+
+function buildIconPicker() {
+  const backdrop = el('<div class="icon-picker-backdrop hidden" id="icon-picker-backdrop"></div>');
+  const picker = el(`
+    <div class="icon-picker hidden" id="icon-picker">
+      <div class="ip-head"><div class="ip-title">选择图标</div><button class="link-btn" id="icon-picker-close">✕</button></div>
+      <div class="ip-custom"><input id="icon-picker-custom" type="text" placeholder="✏️ 自定义 emoji（选填）" maxlength="4"></div>
+      <div class="ip-grid-wrap" id="icon-picker-grid"></div>
+    </div>`);
+  document.body.append(backdrop, picker);
+  $('#icon-picker-backdrop').addEventListener('click', closeIconPicker);
+  $('#icon-picker-close').addEventListener('click', closeIconPicker);
+  $('#icon-picker-custom').addEventListener('input', (e) => {
+    if (!iconPickerTarget) return;
+    $('#' + iconPickerTarget).value = e.target.value.trim();
+    updateIconPreview(iconPickerTarget);
+  });
+  $('#icon-picker-grid').addEventListener('click', (e) => {
+    const it = e.target.closest('.ip-item');
+    if (it) selectIcon(it.dataset.emoji);
+  });
+}
+
 // ================= 分类/账户 编辑 =================
 function openCategoryModal({ catId = null, type = 'expense', presetParentId = null }) {
   const cat = catId ? catById(catId) : null;
@@ -620,7 +744,7 @@ function openCategoryModal({ catId = null, type = 'expense', presetParentId = nu
   const parentVal = cat ? (cat.parentId || '') : (presetParentId || '');
   const body = `
     <div class="form-row"><label>名称</label><input id="c-name" type="text" value="${escapeHtml(cat ? cat.name : '')}" placeholder="分类名称"></div>
-    <div class="form-row"><label>图标</label><input id="c-icon" type="text" value="${escapeHtml(cat ? cat.icon : '')}" placeholder="如 🍜" maxlength="4"></div>
+    ${iconRowHtml('c-icon', effType, cat ? cat.icon : '', '📦')}
     <div class="form-row"><label>颜色</label><input id="c-color" type="color" value="${safeColor(cat ? cat.color : '#4F6EF7')}"></div>
     <div class="form-row"><label>父分类</label>
       <select id="c-parent">
@@ -675,7 +799,7 @@ function openAccountModal(acctId) {
   const a = acctId ? acctById(acctId) : null;
   const body = `
     <div class="form-row"><label>名称</label><input id="a-name" type="text" value="${escapeHtml(a ? a.name : '')}" placeholder="账户名称"></div>
-    <div class="form-row"><label>图标</label><input id="a-icon" type="text" value="${escapeHtml(a ? a.icon : '')}" placeholder="如 💳" maxlength="4"></div>
+    ${iconRowHtml('a-icon', 'account', a ? a.icon : '', '💳')}
     <div class="form-row"><label>颜色</label><input id="a-color" type="color" value="${safeColor(a ? a.color : '#4F6EF7')}"></div>`;
   showModal({
     title: acctId ? '编辑账户' : '新增账户',
@@ -889,6 +1013,10 @@ function bindEvents() {
   $('#sheet-accounts').addEventListener('click', onAccountAreaClick);
   $('#view').addEventListener('click', onViewClick);
   $('#view').addEventListener('change', onViewChange);
+  $('#modal-body').addEventListener('click', (e) => {
+    const p = e.target.closest('.icon-preview');
+    if (p) openIconPicker(p.dataset.target, p.dataset.context);
+  });
 }
 
 function onCatAreaClick(e) {
@@ -932,6 +1060,7 @@ async function onViewClick(e) {
     case 'set-budget': await saveBudget(); break;
     case 'manage-cats': state.subpage = 'cats'; render(); break;
     case 'manage-accts': state.subpage = 'accts'; render(); break;
+    case 'open-about': state.subpage = 'about'; render(); break;
     case 'back-settings': state.subpage = null; render(); break;
     case 'add-parent': openCategoryModal({ type: t.dataset.type || 'expense' }); break;
     case 'add-child': openCategoryModal({ type: (catById(t.dataset.parent) || {}).type || 'expense', presetParentId: t.dataset.parent }); break;
@@ -949,6 +1078,7 @@ async function onViewClick(e) {
 // ================= 启动 =================
 async function init() {
   buildModal();
+  buildIconPicker();
   buildImportInput();
   bindEvents();
   await ensureSeeded();
