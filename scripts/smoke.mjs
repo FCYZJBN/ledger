@@ -263,6 +263,107 @@ async function main() {
   })`));
   results.push(['XSS 注入不生效', !xss.fired && xss.toastChildren === 0 && xss.injectedImgs === 0 && xss.toastText.includes('<img'), xss]);
 
+  // 11. 总预算与分类预算联动：不一致时弹框，选「把总预算改为合计」
+  await evalJs(`document.querySelector('#fab') && document.querySelector('#sheet-backdrop').click()`);
+  await evalJs(`[...document.querySelectorAll('.tab')].find(b => b.dataset.tab === 'settings').click()`);
+  await sleep(300);
+  // 先把总预算设为 ¥100（高于当前已分配，不应弹框）
+  await evalJs(`(() => { const i = document.querySelector('#budget-input'); i.value = '100'; })()`);
+  await evalJs(`document.querySelector('[data-action="set-budget"]').click()`);
+  await sleep(600);
+  const noPrompt = await evalJs(`document.querySelector('#modal').classList.contains('hidden')`);
+  await evalJs(`[...document.querySelectorAll('.tab')].find(b => b.dataset.tab === 'settings').click()`);
+  await sleep(300);
+  await evalJs(`document.querySelector('[data-action="manage-catbudgets"]').click()`);
+  await sleep(300);
+  // 分类预算改成 ¥130，与总预算 ¥100 不一致 → 应弹框
+  await evalJs(`(() => { const i = document.querySelector('.cb-input'); i.value = '130'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  const summary = await evalJs(`(document.querySelector('#cb-summary')||{}).textContent || ''`);
+  await evalJs(`document.querySelector('[data-action="save-catbudgets"]').click()`);
+  await sleep(500);
+  const dialog = JSON.parse(await evalJs(`JSON.stringify({
+    shown: !document.querySelector('#modal').classList.contains('hidden'),
+    text: (document.querySelector('#modal-body')||{}).textContent || '',
+    buttons: [...document.querySelectorAll('#modal-foot button')].map(b => b.textContent),
+  })`));
+  await evalJs(`[...document.querySelectorAll('#modal-foot button')].find(b => b.textContent.includes('把总预算改为')).click()`);
+  await sleep(700);
+  const synced = JSON.parse(await evalJs(`JSON.stringify({
+    budgetCard: (document.querySelector('.budget-nums span')||{}).textContent || '',
+    unalloc: (document.querySelector('.cb-unalloc .cb-status')||{}).textContent || '',
+    unallocLabel: (document.querySelector('.cb-unalloc')||{}).textContent || '',
+  })`));
+  results.push(['预算联动提示', noPrompt && summary.includes('超出总预算') && dialog.shown && dialog.text.includes('相差') && dialog.text.includes('超出') && dialog.buttons.length === 2 && synced.budgetCard.includes('130.00') && synced.unalloc === '¥0.00', { noPrompt, summary, ...dialog, ...synced }]);
+
+  // 12. 未分配是「动态余额」：未设预算的分类花钱后应递减（静态差额则不会变）
+  await evalJs(`[...document.querySelectorAll('.tab')].find(b => b.dataset.tab === 'settings').click()`);
+  await sleep(300);
+  await evalJs(`(() => { const i = document.querySelector('#budget-input'); i.value = '150'; })()`);
+  await evalJs(`document.querySelector('[data-action="set-budget"]').click()`);
+  await sleep(600);
+  const before = await evalJs(`(document.querySelector('.cb-unalloc .cb-status')||{}).textContent || ''`);
+  // 在「交通」（未设分类预算）记 ¥5.00
+  await evalJs(`document.querySelector('#fab').click()`);
+  await sleep(400);
+  await evalJs(`(() => { const i = document.querySelector('#sheet-amount'); i.value = '5.00'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await evalJs(`document.querySelectorAll('.cat-parent')[1].click()`);
+  await sleep(250);
+  await evalJs(`document.querySelector('.cat-child').click()`);
+  await sleep(200);
+  await evalJs(`document.querySelector('#sheet-save').click()`);
+  await sleep(700);
+  const after = JSON.parse(await evalJs(`JSON.stringify({
+    unalloc: (document.querySelector('.cb-unalloc .cb-status')||{}).textContent || '',
+    over: !!document.querySelector('.cb-unalloc .cb-status.over'),
+  })`));
+  // 总预算 ¥150 = 已分配 ¥130 + 未分配 ¥20；交通花掉 ¥5 后未分配应剩 ¥15
+  results.push(['未分配动态递减', before === '¥20.00' && after.unalloc === '¥15.00' && !after.over, { before, ...after }]);
+
+  // 13. 选「保持总额」：总预算不动，差额记为未分配 → 首页应显示「已超分配」红字
+  await evalJs(`[...document.querySelectorAll('.tab')].find(b => b.dataset.tab === 'settings').click()`);
+  await sleep(300);
+  await evalJs(`document.querySelector('[data-action="manage-catbudgets"]').click()`);
+  await sleep(300);
+  await evalJs(`(() => { const i = document.querySelector('.cb-input'); i.value = '200'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await evalJs(`document.querySelector('[data-action="save-catbudgets"]').click()`);
+  await sleep(500);
+  await evalJs(`[...document.querySelectorAll('#modal-foot button')].find(b => b.textContent.includes('保持总额')).click()`);
+  await sleep(700);
+  const kept = JSON.parse(await evalJs(`JSON.stringify({
+    budgetCard: (document.querySelector('.budget-nums span')||{}).textContent || '',
+    unalloc: (document.querySelector('.cb-unalloc')||{}).textContent || '',
+    status: (document.querySelector('.cb-unalloc .cb-status')||{}).textContent || '',
+    over: !!document.querySelector('.cb-unalloc .cb-status.over'),
+  })`));
+  // 总预算仍是 ¥150，分类合计 ¥200 → 超分配 ¥50
+  results.push(['联动选保持总额', kept.budgetCard.includes('150.00') && kept.unalloc.includes('已超分配') && kept.status === '¥50.00' && kept.over, kept]);
+
+  // 14. 调低总预算到已分配以下：先「取消」不生效，再「仍然保存」生效（只提醒不拦截）
+  await evalJs(`[...document.querySelectorAll('.tab')].find(b => b.dataset.tab === 'settings').click()`);
+  await sleep(300);
+  await evalJs(`(() => { const i = document.querySelector('#budget-input'); i.value = '50'; })()`);
+  await evalJs(`document.querySelector('[data-action="set-budget"]').click()`);
+  await sleep(500);
+  const lowWarn = JSON.parse(await evalJs(`JSON.stringify({
+    shown: !document.querySelector('#modal').classList.contains('hidden'),
+    text: (document.querySelector('#modal-body')||{}).textContent || '',
+  })`));
+  await evalJs(`[...document.querySelectorAll('#modal-foot button')].find(b => b.textContent.includes('取消')).click()`);
+  await sleep(400);
+  // 取消后没有跳转，仍在设置页；回首页读总预算
+  await evalJs(`[...document.querySelectorAll('.tab')].find(b => b.dataset.tab === 'home').click()`);
+  await sleep(300);
+  const afterCancel = await evalJs(`document.querySelector('.budget-nums span').textContent`);
+  await evalJs(`[...document.querySelectorAll('.tab')].find(b => b.dataset.tab === 'settings').click()`);
+  await sleep(300);
+  await evalJs(`(() => { const i = document.querySelector('#budget-input'); i.value = '50'; })()`);
+  await evalJs(`document.querySelector('[data-action="set-budget"]').click()`);
+  await sleep(500);
+  await evalJs(`[...document.querySelectorAll('#modal-foot button')].find(b => b.textContent.includes('仍然保存')).click()`);
+  await sleep(700);
+  const afterForce = await evalJs(`document.querySelector('.budget-nums span').textContent`);
+  results.push(['总预算低于已分配提醒', lowWarn.shown && lowWarn.text.includes('超分配') && afterCancel.includes('150.00') && afterForce.includes('50.00'), { ...lowWarn, afterCancel, afterForce }]);
+
   console.log('EXCEPTIONS:', exceptions.length ? JSON.stringify(exceptions, null, 2) : 'none');
   let ok = true;
   for (const [name, pass, detail] of results) {

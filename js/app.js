@@ -105,6 +105,28 @@ function categoryBudgetRows(spentMap) {
     .sort((a, b) => b.ratio - a.ratio);
 }
 
+// 分类预算合计（只算仍然存在的分类）；传 map 用于保存前的预演
+function allocatedTotal(map = categoryBudgets) {
+  return Object.entries(map)
+    .filter(([cid, v]) => v > 0 && catById(cid))
+    .reduce((s, [, v]) => s + v, 0);
+}
+
+// 本月「没设分类预算」的支出大类花了多少 —— 这部分从「未分配」里出
+function unbudgetedSpent() {
+  let sum = 0;
+  monthSpentByRootCat().forEach((v, rid) => {
+    if (!(categoryBudgets[rid] > 0)) sum += v;
+  });
+  return sum;
+}
+
+// 未分配动态余额 = 总预算 − 已分配 − 未设预算分类的实际支出
+// 恒等式：Σ分类剩余 + 未分配 = 总预算 − 本月总支出（首页三个数字始终对得上账）
+function unallocatedBalance() {
+  return budgetAmount - allocatedTotal() - unbudgetedSpent();
+}
+
 // ---------- 渲染入口 ----------
 function render() {
   const view = $('#view');
@@ -119,6 +141,7 @@ function render() {
     });
   } else {
     view.innerHTML = renderSettings();
+    if (state.subpage === 'catbudgets') updateCatBudgetSummary();
   }
   updateTabbar();
 }
@@ -205,6 +228,32 @@ function renderCategoryBudgetCard() {
   return `<div class="budget-card cb-card">
     <div class="budget-top"><span>分类预算</span><span class="budget-status">本月</span></div>
     ${body}
+    ${renderUnallocatedRow()}
+  </div>`;
+}
+
+// 「未分配」行：只在设了总预算时才有意义（没有总额就无所谓分配）
+function renderUnallocatedRow() {
+  if (!(budgetAmount > 0)) return '';
+  const allocated = allocatedTotal();
+  const unalloc = unallocatedBalance();
+  let label = '未分配';
+  let text = fmtMoney(unalloc);
+  let over = false;
+  if (allocated > budgetAmount) {
+    // 设置层面就超了：分类预算合计已经大于总预算
+    label = '已超分配';
+    text = fmtMoney(allocated - budgetAmount);
+    over = true;
+  } else if (unalloc < 0) {
+    // 设置没超，但没设预算的分类把钱花光了
+    label = '未分配';
+    text = `已用完，超 ${fmtMoney(-unalloc)}`;
+    over = true;
+  }
+  return `<div class="cb-unalloc">
+    <span>${label}<span class="cb-unalloc-hint">留给未设预算的分类</span></span>
+    <span class="cb-status ${over ? 'over' : ''}">${text}</span>
   </div>`;
 }
 
@@ -482,7 +531,7 @@ function renderAbout() {
     </div></div>
 
     <div class="set-group"><div class="set-title">小技巧</div><div class="set-card">
-      <div class="about-block">• 添加到主屏幕：浏览器菜单 →「添加到主屏幕」，之后像 App 一样全屏、离线使用。<br>• 预算只提醒不拦截：用掉 80% 进度条变黄、超支变红。<br>• 分类预算：可给餐饮、居住等单个大类单独设预算，只设你在意的几个即可；记账刚好花超时会当场提示。<br>• 分类支持两级：大类下还能建子类，图标一键点选、也可自定义。</div>
+      <div class="about-block">• 添加到主屏幕：浏览器菜单 →「添加到主屏幕」，之后像 App 一样全屏、离线使用。<br>• 预算只提醒不拦截：用掉 80% 进度条变黄、超支变红。<br>• 分类预算：可给餐饮、居住等单个大类单独设预算，只设你在意的几个即可；记账刚好花超时会当场提示。<br>• 总预算 = 各分类预算合计 + 未分配：两边对不上时会问你「把总预算改为分类合计」还是「保持总额、差额记为未分配」，由你决定；未设预算的分类花钱会从未分配里扣。<br>• 分类支持两级：大类下还能建子类，图标一键点选、也可自定义。</div>
     </div></div>
 
     <div class="set-group"><div class="set-title">版本</div><div class="set-card">
@@ -539,10 +588,26 @@ function renderCategoryBudgetManager() {
           </div>`;
         }).join('')}
       </div>
-      <div class="cb-tip">留空表示不设该分类预算；仅对支出大类生效，每月自动重置。</div>
+      <div class="cb-tip" id="cb-summary"></div>
     </div>
     <button class="primary-btn full" data-action="save-catbudgets">保存预算</button>
   </div>`;
+}
+
+// 设置页实时合计：保存前就看得见与总预算的差额，不用等弹窗
+function updateCatBudgetSummary() {
+  const box = $('#cb-summary');
+  if (!box) return;
+  const sum = $$('.cb-input').reduce((s, i) => s + parseAmount(i.value), 0);
+  if (!budgetAmount) {
+    box.innerHTML = `分类预算合计 <b>${fmtMoney(sum)}</b> · 尚未设置总预算`;
+    return;
+  }
+  const diff = sum - budgetAmount;
+  const tail = diff === 0 ? '与总预算一致'
+    : diff > 0 ? `超出总预算 <b class="cb-diff-over">${fmtMoney(diff)}</b>`
+    : `比总预算少 ${fmtMoney(-diff)}`;
+  box.innerHTML = `分类预算合计 <b>${fmtMoney(sum)}</b> · 总预算 ${fmtMoney(budgetAmount)} · ${tail}`;
 }
 
 async function saveCategoryBudgets() {
@@ -552,6 +617,24 @@ async function saveCategoryBudgets() {
     const v = parseAmount(inp.value);
     if (v > 0) { next[inp.dataset.id] = v; count++; }
   });
+  const sum = allocatedTotal(next);
+
+  // 与总预算不一致时，让用户决定哪边适配哪边（没设总预算、或清空分类预算时不打扰）
+  if (budgetAmount > 0 && count > 0 && sum !== budgetAmount) {
+    const diff = sum - budgetAmount;
+    const msg = `分类预算合计 ${fmtMoney(sum)}，与总预算 ${fmtMoney(budgetAmount)} `
+      + (diff > 0 ? `相差 ${fmtMoney(diff)}（超出）` : `相差 ${fmtMoney(-diff)}`);
+    const choice = await chooseDialog('总预算与分类预算不一致', msg, [
+      { label: `把总预算改为 ${fmtMoney(sum)}`, class: 'link-btn', value: 'sync' },
+      { label: '保持总额，差额记为未分配', class: 'primary-btn', value: 'keep' },
+    ]);
+    if (choice === null) return; // 关掉弹窗 = 放弃本次保存
+    if (choice === 'sync') {
+      await db.settings.set('monthlyBudget', sum);
+      budgetAmount = sum;
+    }
+  }
+
   await db.settings.set('categoryBudgets', next);
   categoryBudgets = next;
   state.subpage = null;
@@ -731,22 +814,32 @@ function showModal({ title, body, actions }) {
   $('#modal').classList.remove('hidden');
   $('#modal-backdrop').classList.remove('hidden');
 }
+// 关闭弹窗时若有等待中的对话框，一律当作「取消」——否则 Promise 永远悬着，调用方静默卡死
+let dialogResolve = null;
 function hideModal() {
   $('#modal').classList.add('hidden');
   $('#modal-backdrop').classList.add('hidden');
+  if (dialogResolve) { const done = dialogResolve; dialogResolve = null; done(null); }
+}
+
+// 通用多选项对话框：resolve 所选项的 value，点 ✕/背景关闭则 resolve null
+function chooseDialog(title, message, options) {
+  return new Promise((resolve) => {
+    const done = (v) => { dialogResolve = null; hideModal(); resolve(v); };
+    dialogResolve = done;
+    showModal({
+      title,
+      body: `<div class="confirm-msg">${escapeHtml(message)}</div>`,
+      actions: options.map((o) => ({ label: o.label, class: o.class, onClick: () => done(o.value) })),
+    });
+  });
 }
 
 function confirmDialog(message) {
-  return new Promise((resolve) => {
-    showModal({
-      title: '确认',
-      body: `<div class="confirm-msg">${escapeHtml(message)}</div>`,
-      actions: [
-        { label: '取消', class: 'link-btn', onClick: () => { hideModal(); resolve(false); } },
-        { label: '确定', class: 'danger-btn', onClick: () => { hideModal(); resolve(true); } },
-      ],
-    });
-  });
+  return chooseDialog('确认', message, [
+    { label: '取消', class: 'link-btn', value: false },
+    { label: '确定', class: 'danger-btn', value: true },
+  ]);
 }
 
 let toastTimer = null;
@@ -962,6 +1055,18 @@ async function deleteAccount(id) {
 async function saveBudget() {
   const v = parseAmount($('#budget-input').value);
   if (v <= 0) { toast('请输入有效的预算金额'); return; }
+  // 总预算低于已分配的分类预算合计 → 提醒但允许保存（沿用「只提醒不拦截」）
+  // 调低总预算时刻意不提供「自动调整分类预算」：怎么重排是你的决定，去分类预算页改
+  const allocated = allocatedTotal();
+  if (allocated > v) {
+    const msg = `总预算 ${fmtMoney(v)} 低于分类预算合计 ${fmtMoney(allocated)}，`
+      + `将超分配 ${fmtMoney(allocated - v)}。仍然保存？`;
+    const choice = await chooseDialog('总预算低于已分配', msg, [
+      { label: '取消', class: 'link-btn', value: null },
+      { label: '仍然保存', class: 'primary-btn', value: 'ok' },
+    ]);
+    if (choice !== 'ok') return;
+  }
   await db.settings.set('monthlyBudget', v);
   budgetAmount = v;
   state.tab = 'home';
@@ -1142,6 +1247,9 @@ function bindEvents() {
   $('#sheet-accounts').addEventListener('click', onAccountAreaClick);
   $('#view').addEventListener('click', onViewClick);
   $('#view').addEventListener('change', onViewChange);
+  $('#view').addEventListener('input', (e) => {
+    if (e.target.classList && e.target.classList.contains('cb-input')) updateCatBudgetSummary();
+  });
   $('#modal-body').addEventListener('click', (e) => {
     const p = e.target.closest('.icon-preview');
     if (p) openIconPicker(p.dataset.target, p.dataset.context);
