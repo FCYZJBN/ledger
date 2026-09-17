@@ -50,6 +50,10 @@ async function main() {
   };
   const evalJs = async (expr) => {
     const r = await send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true });
+    // 页内异常必须冒出来，否则只会表现为一个莫名其妙的 undefined
+    if (r.exceptionDetails) {
+      exceptions.push('EVAL: ' + (r.exceptionDetails.exception?.description || r.exceptionDetails.text));
+    }
     return r.result?.value;
   };
 
@@ -215,6 +219,49 @@ async function main() {
     txnCount: document.querySelectorAll('.txn').length,
   })`));
   results.push(['导入往返保预算', roundtrip.cardShown && roundtrip.rows === 1 && roundtrip.overText.includes('已超') && roundtrip.txnCount === 2, roundtrip]);
+
+  // 10. XSS 回归：把分类名换成 HTML payload，确认全程只作纯文本渲染（toast / 列表 / 分类区都不解析）
+  const PAYLOAD = '<img src=x onerror="window.__xss=1">';
+  await evalJs(`(async () => {
+    const open = () => new Promise((res, rej) => { const r = indexedDB.open('ledger-db', 1); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+    const db = await open();
+    // getAll 按主键(id)排序，导入后 id 是随机 uid，所以必须按 sortOrder 取，
+    // 才能拿到记账弹层里第一个大类（餐饮），否则预算会设到别的分类上
+    const cats = await new Promise((res, rej) => {
+      const r = db.transaction('categories', 'readonly').objectStore('categories').getAll();
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    });
+    const food = cats.filter((c) => !c.parentId && c.type === 'expense')
+      .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))[0];
+    // 改名 + 把预算调到刚好差 1 元，下一笔必然跨线，从而触发含分类名的 toast
+    await new Promise((res, rej) => {
+      const tx = db.transaction(['categories', 'settings'], 'readwrite');
+      tx.objectStore('categories').put({ ...food, name: ${JSON.stringify(PAYLOAD)} });
+      tx.objectStore('settings').put({ key: 'categoryBudgets', value: { [food.id]: 3100 } });
+      tx.oncomplete = res; tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error);
+    });
+    db.close();
+  })()`);
+  await sleep(400);
+  await send('Page.reload');
+  await sleep(2500);
+  await evalJs(`document.querySelector('#fab').click()`);
+  await sleep(500);
+  await evalJs(`(() => { const i = document.querySelector('#sheet-amount'); i.value = '1.00'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await evalJs(`document.querySelector('.cat-parent').click()`);
+  await sleep(250);
+  await evalJs(`document.querySelector('.cat-child').click()`);
+  await sleep(200);
+  await evalJs(`document.querySelector('#sheet-save').click()`);
+  await sleep(800);
+  const xss = JSON.parse(await evalJs(`JSON.stringify({
+    fired: typeof window.__xss !== 'undefined',
+    toastText: (document.querySelector('#toast')||{}).textContent || '',
+    toastChildren: (document.querySelector('#toast')||{}).childElementCount,
+    injectedImgs: document.querySelectorAll('#toast img, #view img, .cat-area img').length,
+    literalInList: (document.querySelector('#view')||{}).textContent.includes('<img'),
+  })`));
+  results.push(['XSS 注入不生效', !xss.fired && xss.toastChildren === 0 && xss.injectedImgs === 0 && xss.toastText.includes('<img'), xss]);
 
   console.log('EXCEPTIONS:', exceptions.length ? JSON.stringify(exceptions, null, 2) : 'none');
   let ok = true;
