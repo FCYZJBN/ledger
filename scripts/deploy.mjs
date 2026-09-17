@@ -2,7 +2,7 @@
 // 作为 `git push` 的兜底：把当前 HEAD 的提交内容镜像成一个提交推到远端分支
 // 用法：node scripts/deploy.mjs
 import { execFileSync } from 'node:child_process';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join, relative, sep, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -11,15 +11,30 @@ const REPO = 'ledger';
 const BRANCH = 'main';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-function walk(dir) {
-  const out = [];
-  for (const name of readdirSync(dir)) {
-    if (name === '.git' || name === 'node_modules' || name === '__pycache__') continue;
-    const full = join(dir, name);
-    if (statSync(full).isDirectory()) out.push(...walk(full));
-    else out.push(full);
-  }
-  return out;
+// 绝不外发的路径：真实账单、本地财务数据、私密目录。
+// 本仓库是公开仓库，命中即等于把姓名、手机号与全部消费记录公开。
+const FORBIDDEN = [
+  /账单/, /交易明细/, /流水/, /微信支付/, /支付宝/,
+  /\.xlsx$/i, /\.xls$/i, /\.csv$/i,
+  /(^|\/)private\//, /(^|\/)testdata-local\//,
+];
+
+// 用 git 自己的清单，而不是遍历目录。
+//
+// 这里曾经是 readdirSync 递归收集，只跳过 .git/node_modules —— 它不读 .gitignore，
+// 于是「本地目录即仓库内容」这个设计会把工作目录里的真实账单一起镜像到公开仓库。
+// `git ls-files --cached --others --exclude-standard` 给出的正好是
+// 「此刻 git add -A 会提交的文件」，.gitignore 的排除天然生效。
+// 兜底推送与 git push 的产物因此保持一致，而不是多出一堆不该外发的文件。
+function listFiles() {
+  const out = execFileSync(
+    'git',
+    ['ls-files', '-z', '--cached', '--others', '--exclude-standard'],
+    { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }
+  );
+  return out.split('\0').filter(Boolean)
+    .map((p) => join(ROOT, p.split('/').join(sep)))
+    .filter((f) => existsSync(f)); // 已删但仍被跟踪的文件交给远端的全量 tree 体现
 }
 
 function gh(args, body) {
@@ -33,8 +48,20 @@ function gh(args, body) {
 function main() {
   // 复用本地 HEAD 的提交信息，保证镜像提交与本地一致
   const message = execFileSync('git', ['log', '-1', '--pretty=%B'], { cwd: ROOT, encoding: 'utf8' }).trim();
-  const files = walk(ROOT);
-  console.log('本地文件数:', files.length);
+  const files = listFiles();
+  console.log('待推送文件数:', files.length);
+
+  // 硬闸门：清单里一旦出现账单类文件就直接退出，不推任何东西。
+  // 上面换成 git 清单后这里理论上不会命中，但「理论上」不是能拿真实财务数据去赌的东西 ——
+  // 万一 .gitignore 被改坏、或哪天有人 `git add -f` 了账单，这道闸门会在推送前拦住。
+  const paths = files.map((f) => relative(ROOT, f).split(sep).join('/'));
+  const bad = paths.filter((p) => FORBIDDEN.some((re) => re.test(p)));
+  if (bad.length) {
+    console.error('\n❌ 拒绝推送：清单里出现账单/财务类文件，本仓库是公开仓库。');
+    bad.forEach((p) => console.error('   -', p));
+    console.error('   请先确认它们已被 .gitignore 排除且未被跟踪（git rm --cached），再重试。');
+    process.exit(1);
+  }
 
   // 1. 每个文件建 blob（二进制走 base64）
   const tree = files.map((f) => {
