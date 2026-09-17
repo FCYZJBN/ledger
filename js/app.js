@@ -25,6 +25,7 @@ let transactions = [];
 let categories = [];
 let accounts = [];
 let budgetAmount = 0; // 分
+let categoryBudgets = {}; // { 支出大类ID: 分 }，只按月、只针对支出大类
 
 // ---------- 状态 ----------
 const state = {
@@ -67,15 +68,41 @@ function sumType(list, type) { return list.filter((t) => t.type === type).reduce
 
 // ---------- 数据加载 ----------
 async function loadData() {
-  const [t, c, a, budget] = await Promise.all([
+  const [t, c, a, budget, catBudgets] = await Promise.all([
     db.txns.all(), db.categories.all(), db.accounts.all(),
     db.settings.get('monthlyBudget', 0),
+    db.settings.get('categoryBudgets', {}),
   ]);
   transactions = t;
   categories = c;
   accounts = a;
   budgetAmount = budget;
+  categoryBudgets = (catBudgets && typeof catBudgets === 'object' && !Array.isArray(catBudgets)) ? catBudgets : {};
   transactions.sort((x, y) => y.date.localeCompare(x.date) || (y.createdAt || 0) - (x.createdAt || 0));
+}
+
+// 本月各支出大类的已花金额（子类自动汇总到父类）
+function monthSpentByRootCat(excludeId = null) {
+  const tm = thisMonthKey();
+  const map = new Map();
+  transactions.forEach((t) => {
+    if (t.type !== 'expense' || monthKey(t.date) !== tm) return;
+    if (excludeId && t.id === excludeId) return;
+    const rid = rootCatId(t.categoryId);
+    map.set(rid, (map.get(rid) || 0) + t.amount);
+  });
+  return map;
+}
+
+// 已设预算的支出大类，按「超支程度」降序（有问题的排前面）
+function categoryBudgetRows(spentMap) {
+  return Object.entries(categoryBudgets)
+    .filter(([cid, limit]) => limit > 0 && catById(cid))
+    .map(([cid, limit]) => {
+      const used = spentMap.get(cid) || 0;
+      return { cat: catById(cid), limit, used, ratio: used / limit };
+    })
+    .sort((a, b) => b.ratio - a.ratio);
 }
 
 // ---------- 渲染入口 ----------
@@ -141,6 +168,7 @@ function renderHome() {
   return `
   <div class="page home-page">
     ${budgetHtml}
+    ${renderCategoryBudgetCard()}
     <div class="overview-card">
       <div class="ov-item"><div class="ov-label">本月支出</div><div class="ov-val">${fmtMoney(expense)}</div></div>
       <div class="ov-item"><div class="ov-label">本月收入</div><div class="ov-val ov-in">${fmtMoney(income)}</div></div>
@@ -151,6 +179,32 @@ function renderHome() {
       <div class="section-head"><span>最近记录</span><button class="link-btn" data-action="go-list">全部 ›</button></div>
       ${recent.length ? recent.map(txnRow).join('') : emptyHint('还没有记录，点下方 ＋ 记一笔')}
     </div>
+  </div>`;
+}
+
+// 首页的「分类预算」卡：只列出已设预算的分类，一个都没设则整张卡不显示
+function renderCategoryBudgetCard() {
+  const rows = categoryBudgetRows(monthSpentByRootCat());
+  if (!rows.length) return '';
+  const body = rows.map(({ cat, limit, used, ratio }) => {
+    const pct = Math.min(100, Math.round(ratio * 100));
+    let cls = 'budget-bar-fill';
+    if (ratio >= 1) cls += ' over';
+    else if (ratio >= 0.8) cls += ' warn';
+    const over = ratio >= 1;
+    const status = over ? `已超 ${fmtMoney(used - limit)}` : `剩余 ${fmtMoney(limit - used)}`;
+    return `<div class="cb-row">
+      <div class="cb-top">
+        <span class="cb-name"><span class="cb-ico">${escapeHtml(cat.icon)}</span>${escapeHtml(cat.name)}</span>
+        <span class="cb-status ${over ? 'over' : ''}">${status}</span>
+      </div>
+      <div class="budget-bar"><div class="${cls}" style="width:${pct}%"></div></div>
+      <div class="cb-nums">${fmtMoneyShort(used)} / ${fmtMoneyShort(limit)}</div>
+    </div>`;
+  }).join('');
+  return `<div class="budget-card cb-card">
+    <div class="budget-top"><span>分类预算</span><span class="budget-status">本月</span></div>
+    ${body}
   </div>`;
 }
 
@@ -361,6 +415,7 @@ function renderStatsHtml(d) {
 function renderSettings() {
   if (state.subpage === 'cats') return renderCategoryManager();
   if (state.subpage === 'accts') return renderAccountManager();
+  if (state.subpage === 'catbudgets') return renderCategoryBudgetManager();
   if (state.subpage === 'about') return renderAbout();
   return renderSettingsHome();
 }
@@ -383,6 +438,7 @@ function renderSettingsHome() {
       <div class="set-card">
         <button class="set-row arrow" data-action="manage-cats">📂 分类管理 <span>›</span></button>
         <button class="set-row arrow" data-action="manage-accts">💳 账户管理 <span>›</span></button>
+        <button class="set-row arrow" data-action="manage-catbudgets">🎯 分类预算 <span>›</span></button>
       </div>
     </div>
     <div class="set-group">
@@ -418,7 +474,7 @@ function renderAbout() {
     </div></div>
 
     <div class="set-group"><div class="set-title">快速上手</div><div class="set-card">
-      <div class="about-block"><b>1.</b> 点底部 ＋，输入金额、选分类、选账户，保存即可（默认今天）。<br><b>2.</b> 首页看本月收支与预算，明细按日期回看，统计看图表。<br><b>3.</b> 设置里可自定义分类、账户，设每月预算帽。</div>
+      <div class="about-block"><b>1.</b> 点底部 ＋，输入金额、选分类、选账户，保存即可（默认今天）。<br><b>2.</b> 首页看本月收支与预算，明细按日期回看，统计看图表。<br><b>3.</b> 设置里可自定义分类、账户，设每月总预算和分类预算。</div>
     </div></div>
 
     <div class="set-group"><div class="set-title">数据安全</div><div class="set-card">
@@ -426,7 +482,7 @@ function renderAbout() {
     </div></div>
 
     <div class="set-group"><div class="set-title">小技巧</div><div class="set-card">
-      <div class="about-block">• 添加到主屏幕：浏览器菜单 →「添加到主屏幕」，之后像 App 一样全屏、离线使用。<br>• 预算帽只提醒不拦截：用掉 80% 进度条变黄、超支变红。<br>• 分类支持两级：大类下还能建子类，图标一键点选、也可自定义。</div>
+      <div class="about-block">• 添加到主屏幕：浏览器菜单 →「添加到主屏幕」，之后像 App 一样全屏、离线使用。<br>• 预算只提醒不拦截：用掉 80% 进度条变黄、超支变红。<br>• 分类预算：可给餐饮、居住等单个大类单独设预算，只设你在意的几个即可；记账刚好花超时会当场提示。<br>• 分类支持两级：大类下还能建子类，图标一键点选、也可自定义。</div>
     </div></div>
 
     <div class="set-group"><div class="set-title">版本</div><div class="set-card">
@@ -466,6 +522,42 @@ function renderCategoryManager() {
     html += `</div></div>`;
   });
   return html + `</div>`;
+}
+
+function renderCategoryBudgetManager() {
+  const parents = parentsOf('expense');
+  return `
+  <div class="page manage-page">
+    <div class="page-head"><button class="link-btn" data-action="back-settings">‹ 返回</button><span class="page-title">分类预算</span></div>
+    <div class="set-group">
+      <div class="set-card">
+        ${parents.map((p) => {
+          const v = categoryBudgets[p.id] || 0;
+          return `<div class="set-row cb-mgr-row">
+            <span class="cb-name"><span class="cb-ico">${escapeHtml(p.icon)}</span>${escapeHtml(p.name)}</span>
+            <div class="set-input-wrap"><span>¥</span><input class="cb-input" data-id="${p.id}" type="text" inputmode="decimal" value="${v ? fmtMoneyShort(v) : ''}" placeholder="不设"></div>
+          </div>`;
+        }).join('')}
+      </div>
+      <div class="cb-tip">留空表示不设该分类预算；仅对支出大类生效，每月自动重置。</div>
+    </div>
+    <button class="primary-btn full" data-action="save-catbudgets">保存预算</button>
+  </div>`;
+}
+
+async function saveCategoryBudgets() {
+  const next = {};
+  let count = 0;
+  $$('.cb-input').forEach((inp) => {
+    const v = parseAmount(inp.value);
+    if (v > 0) { next[inp.dataset.id] = v; count++; }
+  });
+  await db.settings.set('categoryBudgets', next);
+  categoryBudgets = next;
+  state.subpage = null;
+  state.tab = 'home';
+  render();
+  toast(count ? `已保存 ${count} 个分类预算` : '已清空分类预算');
 }
 
 function renderAccountManager() {
@@ -582,12 +674,30 @@ async function saveSheet() {
     createdAt: existing ? existing.createdAt : Date.now(),
     updatedAt: Date.now(),
   };
+  // 保存前判断：这笔是否让某分类由「未超」变「已超」（编辑时排除这条的旧值）
+  const overMsg = crossBudgetMessage(txn);
   if (state.editingId) await db.txns.update(txn);
   else await db.txns.add(txn);
   closeSheet();
   await loadData();
   render();
-  toast('已保存');
+  toast(overMsg || '已保存');
+}
+
+// 若本次保存使该分类本月支出跨过预算红线，返回提示文案，否则 null
+function crossBudgetMessage(txn) {
+  if (txn.type !== 'expense') return null;
+  if (monthKey(txn.date) !== thisMonthKey()) return null;
+  const rootId = rootCatId(txn.categoryId);
+  const limit = categoryBudgets[rootId] || 0;
+  if (!(limit > 0)) return null;
+  const before = monthSpentByRootCat(state.editingId).get(rootId) || 0;
+  const after = before + txn.amount;
+  if (before <= limit && after > limit) {
+    const c = catById(rootId);
+    return `${c ? c.name : '该分类'} 已超预算 ${fmtMoney(after - limit)}`;
+  }
+  return null;
 }
 
 async function copyTxn(id) {
@@ -790,6 +900,14 @@ async function deleteCategory(id) {
   const ok = await confirmDialog(`删除分类「${cat.name}」${kids.length ? `及其 ${kids.length} 个子分类` : ''}？`);
   if (!ok) return;
   for (const cid of ids) await db.categories.remove(cid);
+  // 顺带清掉被删分类的预算，避免留下孤儿数据
+  const nextBudgets = { ...categoryBudgets };
+  let budgetChanged = false;
+  ids.forEach((cid) => { if (nextBudgets[cid] !== undefined) { delete nextBudgets[cid]; budgetChanged = true; } });
+  if (budgetChanged) {
+    await db.settings.set('categoryBudgets', nextBudgets);
+    categoryBudgets = nextBudgets;
+  }
   await loadData();
   render();
   toast('已删除');
@@ -870,6 +988,7 @@ function exportJSON() {
     version: 1,
     exportedAt: new Date().toISOString(),
     budget: budgetAmount,
+    categoryBudgets,
     categories,
     accounts,
     transactions,
@@ -950,7 +1069,17 @@ function sanitizeImport(raw) {
   }));
 
   const budget = Number.isFinite(raw.budget) ? Math.max(0, Math.round(raw.budget)) : null;
-  return { categories: cats, accounts: accts, transactions: txns, budget };
+
+  // 分类预算：键是分类 id，必须跟着重映射后的新 id 走；老备份没有此字段则视为空
+  const rawBudgets = (raw.categoryBudgets && typeof raw.categoryBudgets === 'object' && !Array.isArray(raw.categoryBudgets))
+    ? raw.categoryBudgets : {};
+  const budgets = {};
+  Object.entries(rawBudgets).forEach(([oldId, v]) => {
+    const newId = catIdMap.get(oldId);
+    if (newId && Number.isFinite(v) && v > 0) budgets[newId] = Math.round(v);
+  });
+
+  return { categories: cats, accounts: accts, transactions: txns, budget, categoryBudgets: budgets };
 }
 
 function importJSON(file) {
@@ -1060,6 +1189,8 @@ async function onViewClick(e) {
     case 'set-budget': await saveBudget(); break;
     case 'manage-cats': state.subpage = 'cats'; render(); break;
     case 'manage-accts': state.subpage = 'accts'; render(); break;
+    case 'manage-catbudgets': state.subpage = 'catbudgets'; render(); break;
+    case 'save-catbudgets': await saveCategoryBudgets(); break;
     case 'open-about': state.subpage = 'about'; render(); break;
     case 'back-settings': state.subpage = null; render(); break;
     case 'add-parent': openCategoryModal({ type: t.dataset.type || 'expense' }); break;

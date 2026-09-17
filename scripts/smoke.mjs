@@ -137,6 +137,73 @@ async function main() {
   const previewEmoji = await evalJs(`document.querySelector('#c-icon-preview .ip-emoji').textContent`);
   results.push(['图标点选面板', modalOpen && hasPreview && pickerOpen && gridCount > 10 && pickerClosed && firstEmoji === previewEmoji, { modalOpen, hasPreview, pickerOpen, gridCount, firstEmoji, previewEmoji }]);
 
+  // 7. 分类预算：设置 → 保存 → 首页出现进度条
+  await evalJs(`document.querySelector('[data-action="back-settings"]').click()`);
+  await sleep(200);
+  await evalJs(`document.querySelector('[data-action="manage-catbudgets"]').click()`);
+  await sleep(300);
+  const mgr = JSON.parse(await evalJs(`JSON.stringify({
+    rows: document.querySelectorAll('.cb-input').length,
+    emptyPlaceholder: document.querySelector('.cb-input').placeholder,
+  })`));
+  // 给第一个支出大类（餐饮）设 30 元预算：已花 25.50，尚未超支（应为黄色 warn 状态）
+  await evalJs(`(() => { const i = document.querySelector('.cb-input'); i.value = '30'; })()`);
+  await evalJs(`document.querySelector('[data-action="save-catbudgets"]').click()`);
+  await sleep(700);
+  const budgetCard = JSON.parse(await evalJs(`JSON.stringify({
+    cardShown: !!document.querySelector('.cb-card'),
+    rows: document.querySelectorAll('.cb-card .cb-row').length,
+    hasOver: !!document.querySelector('.cb-status.over'),
+    status: (document.querySelector('.cb-card .cb-status')||{}).textContent || '',
+    barWarn: !!document.querySelector('.cb-card .budget-bar-fill.warn'),
+    nums: (document.querySelector('.cb-card .cb-nums')||{}).textContent || '',
+  })`));
+  results.push(['分类预算卡片', mgr.rows >= 9 && mgr.emptyPlaceholder === '不设' && budgetCard.cardShown && budgetCard.rows === 1 && !budgetCard.hasOver && budgetCard.barWarn && budgetCard.status.includes('剩余'), { ...mgr, ...budgetCard }]);
+
+  // 8. 记账跨线提示：再记 5 元同分类（累计 30.50 > 30），应弹「已超预算」且卡片转红
+  await evalJs(`document.querySelector('#fab').click()`);
+  await sleep(400);
+  await evalJs(`(() => { const i = document.querySelector('#sheet-amount'); i.value = '5.00'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await evalJs(`document.querySelector('.cat-parent').click()`);
+  await sleep(200);
+  await evalJs(`document.querySelector('.cat-child').click()`);
+  await sleep(150);
+  await evalJs(`document.querySelector('#sheet-save').click()`);
+  await sleep(700);
+  const cross = JSON.parse(await evalJs(`JSON.stringify({
+    toast: (document.querySelector('#toast')||{}).textContent || '',
+    barOver: !!document.querySelector('.cb-card .budget-bar-fill.over'),
+    overText: (document.querySelector('.cb-status.over')||{}).textContent || '',
+  })`));
+  results.push(['记账跨线提示', cross.toast.includes('已超预算') && cross.barOver && cross.overText.includes('已超'), cross]);
+
+  // 9. 导入往返：分类预算的键是分类 id，导入会重建全部 id，预算必须跟着重映射存活
+  await evalJs(`(async () => {
+    const db = await new Promise((res, rej) => { const r = indexedDB.open('ledger-db', 1); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+    const get = (s) => new Promise((res, rej) => { const r = db.transaction(s, 'readonly').objectStore(s).getAll(); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+    const cats = await get('categories');
+    const accts = await get('accounts');
+    const txns = await get('transactions');
+    const food = cats.find((c) => c.name === '餐饮' && !c.parentId);
+    db.close();
+    const payload = { app: '记账本', version: 1, budget: 0, categoryBudgets: { [food.id]: 3000 }, categories: cats, accounts: accts, transactions: txns };
+    const dt = new DataTransfer();
+    dt.items.add(new File([JSON.stringify(payload)], 'backup.json', { type: 'application/json' }));
+    const inp = document.querySelector('input[type=file]');
+    inp.files = dt.files;
+    inp.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await sleep(600);
+  await evalJs(`document.querySelector('#modal-foot .danger-btn').click()`);
+  await sleep(900);
+  const roundtrip = JSON.parse(await evalJs(`JSON.stringify({
+    cardShown: !!document.querySelector('.cb-card'),
+    rows: document.querySelectorAll('.cb-card .cb-row').length,
+    overText: (document.querySelector('.cb-status.over')||{}).textContent || '',
+    txnCount: document.querySelectorAll('.txn').length,
+  })`));
+  results.push(['导入往返保预算', roundtrip.cardShown && roundtrip.rows === 1 && roundtrip.overText.includes('已超') && roundtrip.txnCount === 2, roundtrip]);
+
   console.log('EXCEPTIONS:', exceptions.length ? JSON.stringify(exceptions, null, 2) : 'none');
   let ok = true;
   for (const [name, pass, detail] of results) {

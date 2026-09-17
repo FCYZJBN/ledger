@@ -93,17 +93,21 @@ export async function clear(storeName) {
 }
 
 // 原子化导入：在单个事务里清空并写入全部数据，避免中途失败导致半导入状态
-export async function importAll({ categories: cats, accounts: accts, transactions: txns, budget }) {
+export async function importAll({ categories: cats, accounts: accts, transactions: txns, budget, categoryBudgets }) {
   const db = await openDB();
   const tx = db.transaction(['transactions', 'categories', 'accounts', 'settings'], 'readwrite');
+  const settings = tx.objectStore('settings');
   tx.objectStore('transactions').clear();
   tx.objectStore('categories').clear();
   tx.objectStore('accounts').clear();
   (cats || []).forEach((c) => tx.objectStore('categories').put(c));
   (accts || []).forEach((a) => tx.objectStore('accounts').put(a));
   (txns || []).forEach((t) => tx.objectStore('transactions').put(t));
-  if (typeof budget === 'number') tx.objectStore('settings').put({ key: 'monthlyBudget', value: budget });
-  else tx.objectStore('settings').delete('monthlyBudget');
+  if (typeof budget === 'number') settings.put({ key: 'monthlyBudget', value: budget });
+  else settings.delete('monthlyBudget');
+  // 分类预算同样以备份为准：没有就置空，不留旧值
+  if (categoryBudgets && Object.keys(categoryBudgets).length) settings.put({ key: 'categoryBudgets', value: categoryBudgets });
+  else settings.delete('categoryBudgets');
   await txDone(tx);
 }
 

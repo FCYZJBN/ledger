@@ -76,6 +76,8 @@ const injectJs = `
     ts.clear();
     txns.forEach((t) => ts.put(t));
     tx.objectStore('settings').put({ key: 'monthlyBudget', value: 300000 });
+    // 分类预算：交通超支(红) / 餐饮接近(黄) / 购物正常(蓝)，一张图展示三种状态
+    tx.objectStore('settings').put({ key: 'categoryBudgets', value: { 'p-transport': 2500, 'p-food': 10000, 'p-shopping': 50000 } });
     tx.oncomplete = res;
     tx.onerror = () => rej(tx.error);
     tx.onabort = () => rej(tx.error);
