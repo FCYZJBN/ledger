@@ -75,9 +75,10 @@ const injectJs = `
     const ts = tx.objectStore('transactions');
     ts.clear();
     txns.forEach((t) => ts.put(t));
-    tx.objectStore('settings').put({ key: 'monthlyBudget', value: 300000 });
-    // 分类预算：交通超支(红) / 餐饮接近(黄) / 购物正常(蓝)，一张图展示三种状态
-    tx.objectStore('settings').put({ key: 'categoryBudgets', value: { 'p-transport': 2500, 'p-food': 10000, 'p-shopping': 50000 } });
+    tx.objectStore('settings').put({ key: 'monthlyBudget', value: 500000 });
+    // 分类预算：交通超支(红) / 餐饮接近(黄) / 购物·居住正常(蓝)，一张图展示三种状态
+    // 总预算 5000 = 分类合计 4625 + 未分配 375，未分配再扣掉没设预算的「娱乐」才是最终数字
+    tx.objectStore('settings').put({ key: 'categoryBudgets', value: { 'p-transport': 2500, 'p-food': 10000, 'p-shopping': 50000, 'p-home': 400000 } });
     tx.oncomplete = res;
     tx.onerror = () => rej(tx.error);
     tx.onabort = () => rej(tx.error);
@@ -121,6 +122,20 @@ async function main() {
   await evalJs(injectJs);
   await send('Page.reload');
   await sleep(2600);
+
+  // --dump：只打印首页数字，用来核对示例数据讲不讲得通（不写文件、不截图）
+  if (process.argv.includes('--dump')) {
+    const flat = (sel) => `(document.querySelector('${sel}')||{}).textContent?.replace(/\\s+/g,' ').trim() || ''`;
+    const dump = await evalJs(`JSON.stringify({
+      budget: ${flat('.budget-card')},
+      unalloc: ${flat('.cb-unalloc')},
+      rows: [...document.querySelectorAll('.cb-card .cb-row')].map(r => r.textContent.replace(/\\s+/g,' ').trim()),
+    }, null, 1)`);
+    console.log(dump);
+    chrome.kill();
+    ws.close();
+    process.exit(0);
+  }
 
   // 首页
   await shot('01-home');
