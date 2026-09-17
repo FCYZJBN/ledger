@@ -2,7 +2,7 @@
 import { spawn } from 'node:child_process';
 
 const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
-const URL = 'http://localhost:8001/';
+const URL = process.env.SMOKE_URL || 'http://localhost:8001/';
 const PORT = 9333;
 const PROFILE = 'C:/Users/FCYZJBN/AppData/Local/Temp/ledger-chrome-' + Date.now();
 
@@ -54,7 +54,18 @@ async function main() {
   };
 
   await send('Runtime.enable');
-  await sleep(2000);
+
+  // 就绪等待：线上首次加载要装 Service Worker + 拉图表库，比本地慢得多
+  const waitFor = async (expr, timeout = 25000) => {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeout) {
+      if (await evalJs(expr)) return true;
+      await sleep(250);
+    }
+    return false;
+  };
+  const appReady = await waitFor(`document.querySelectorAll('#tabbar .tab').length === 4 && ((document.querySelector('#view')||{}).innerHTML||'').length > 0`);
+  if (!appReady) { console.error('SMOKE FAIL: 应用未在超时内完成渲染'); chrome.kill(); process.exit(1); }
 
   // 1. 首页渲染
   const home = JSON.parse(await evalJs(`JSON.stringify({
@@ -96,6 +107,7 @@ async function main() {
   results.push(['明细列表', list.dayGroups === 1 && list.copyBtn && list.delBtn, list]);
 
   // 4. 统计页图表
+  await waitFor(`typeof echarts !== 'undefined'`);
   await evalJs(`[...document.querySelectorAll('.tab')].find(b => b.dataset.tab === 'stats').click()`);
   await sleep(900);
   const stats = JSON.parse(await evalJs(`JSON.stringify({

@@ -104,9 +104,20 @@ npx serve .
 
 ```bash
 node scripts/serve.js          # 先起本地服务
-node scripts/smoke.mjs         # 端到端冒烟（渲染 / 记一笔 / 明细 / 统计 / 关于 / 图标面板）
+node scripts/smoke.mjs         # 端到端冒烟（渲染 / 记一笔 / 明细 / 统计 / 关于 / 图标面板 / 分类预算 / 导入往返）
+SMOKE_URL=https://fcyzjbn.github.io/ledger/ node scripts/smoke.mjs   # 直接对线上跑同一套
 node scripts/screenshot.mjs    # 重新生成 README 截图（需本地服务已起）
 ```
+
+### 国内网络推送备用方案
+
+若 `git push` 连不上 github.com（`api.github.com` 通常仍可达），可用 Git Data API 兜底推送：
+
+```bash
+node scripts/deploy.mjs
+```
+
+它会读取当前 HEAD 的提交信息，把本地文件全量同步成一个提交推到 `main`。注意提交由 GitHub 侧生成，**本地与远端内容一致但 sha 不同**；等 github.com 恢复后执行 `git fetch origin && git reset --hard origin/main` 对齐即可。
 
 ---
 
