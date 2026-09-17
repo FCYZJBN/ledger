@@ -328,10 +328,13 @@ export function parseBill(rows) {
     const status = get('status');
     const txnType = get('txnType');
     const alipayCat = get('category');
+    // 两种「转账」性质不同，默认勾选状态也不同，必须分开标：
+    //   internal = 自己账户之间挪钱（支付宝小荷包自动攒），既不是收入也不是支出 → 默认不勾
+    //   p2p      = 与人之间的往来（微信转账/红包），钱确实动了 → 默认勾但打标记
     const tags = [];
     if (/退款/.test(status) || /退款/.test(txnType)) tags.push('refund');
-    if (source === 'alipay' && alipayCat === '账户存取') tags.push('transfer');
-    if (source === 'wechat' && TRANSFER_TXN_TYPES.includes(txnType)) tags.push('transfer');
+    if (source === 'alipay' && alipayCat === '账户存取') tags.push('internal');
+    if (source === 'wechat' && TRANSFER_TXN_TYPES.includes(txnType)) tags.push('p2p');
 
     const party = get('party');
     const product = get('product');

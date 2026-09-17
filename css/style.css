@@ -438,3 +438,73 @@ input, select { font-family: inherit; font-size: inherit; color: var(--text); }
 .about-slogan { font-size: 13px; color: var(--text-2); margin-top: 3px; }
 .about-block { font-size: 14px; line-height: 1.7; padding: 12px 0; }
 .about-block b { font-weight: 600; }
+
+/* ===== 账单导入 ===== */
+.import-page { padding-bottom: 90px; }
+.import-note { text-align: center; font-size: 12px; color: var(--text-3); margin-top: -4px; }
+.import-hint { font-size: 13px; color: var(--text-2); }
+
+/* 解析结果摘要 */
+.import-summary { padding: 14px 16px; }
+.import-head { display: flex; align-items: center; justify-content: space-between; }
+.import-src { font-weight: 600; font-size: 16px; }
+.import-idx { font-size: 13px; color: var(--text-2); }
+.import-nums { display: flex; gap: 26px; margin: 10px 0 8px; }
+.import-nums div { display: flex; flex-direction: column; gap: 2px; }
+.import-nums span { font-size: 12px; color: var(--text-2); }
+.import-nums b { font-size: 19px; font-weight: 700; }
+.import-range { font-size: 12px; color: var(--text-3); }
+.import-ok { font-size: 12px; color: var(--income); margin-top: 6px; }
+
+/* 解析失败 / 对账不通过 */
+.import-error { padding: 14px 16px; }
+.import-err-title { font-weight: 600; font-size: 15px; color: var(--danger); }
+.import-err-file { font-size: 12px; color: var(--text-3); margin-top: 4px; word-break: break-all; }
+.import-err-list { margin: 8px 0 0; padding-left: 18px; font-size: 13px; line-height: 1.7; color: var(--danger); }
+
+/* 批量操作 */
+.bill-bulk { display: flex; gap: 8px; margin-bottom: 12px; }
+.bill-bulk .ghost-btn { flex: 1; margin: 0; font-size: 13px; padding: 8px 0; }
+
+/* 待确认列表 */
+.bill-list { display: flex; flex-direction: column; gap: 8px; }
+.bill-row {
+  display: flex; align-items: flex-start; gap: 10px;
+  background: var(--card); border-radius: var(--radius);
+  padding: 11px 12px; box-shadow: var(--shadow);
+}
+/* 未勾选：整行压暗，一眼看出哪些不会入库 */
+.bill-row.is-off { opacity: 0.45; }
+.bill-check { width: 20px; height: 20px; margin: 1px 0 0; flex: none; accent-color: var(--primary); }
+.bill-main { flex: 1; min-width: 0; }
+.bill-top { display: flex; align-items: baseline; gap: 8px; }
+.bill-party { flex: 1; min-width: 0; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bill-amount { flex: none; font-weight: 600; font-variant-numeric: tabular-nums; }
+.bill-amount.is-out { color: var(--expense); }
+.bill-amount.is-in { color: var(--income); }
+.bill-sub { font-size: 12px; color: var(--text-3); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bill-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.bill-tag { font-size: 11px; padding: 1px 6px; border-radius: 6px; line-height: 1.6; }
+.tag-refund { background: #fff5e6; color: var(--warn); }
+.tag-p2p { background: var(--primary-soft); color: var(--primary); }
+.tag-internal { background: #f0f1f4; color: var(--text-2); }
+.tag-dup { background: var(--danger-soft); color: var(--danger); }
+.bill-cat {
+  flex: none; max-width: 40%; font-size: 12px; color: var(--text-2);
+  border: 1px solid var(--line); border-radius: 8px; padding: 5px 4px; background: #fff;
+}
+
+/* 底部汇总条：浮在底部导航之上 */
+.bill-footer {
+  position: fixed; left: 0; right: 0;
+  bottom: calc(76px + env(safe-area-inset-bottom));
+  margin: 0 auto; max-width: 520px;
+  background: var(--card); border-top: 1px solid var(--line);
+  padding: 10px 16px 12px; z-index: 70;
+  box-shadow: 0 -2px 12px rgba(31, 35, 41, 0.06);
+}
+.bill-foot-nums { display: flex; justify-content: space-between; font-size: 13px; color: var(--text-2); margin-bottom: 8px; }
+.bill-foot-nums b { color: var(--text); }
+.bill-foot-nums .is-out { color: var(--expense); }
+.bill-footer .primary-btn.full { margin: 0; }
+.bill-footer .primary-btn[disabled] { opacity: 0.45; }

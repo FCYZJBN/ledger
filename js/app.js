@@ -2,6 +2,7 @@
 import * as db from './db.js';
 import { ensureSeeded } from './seed.js';
 import { renderCategoryPie, renderTrend } from './charts.js';
+import { readBillFile, markDuplicates, suggestCategory, toTxn } from './bill.js';
 import {
   uid, escapeHtml, fmtMoney, fmtMoneyShort, parseAmount,
   todayStr, toDateStr, monthKey, thisMonthKey, addMonths, lastNMonthKeys, daysInMonth,
@@ -26,11 +27,17 @@ let categories = [];
 let accounts = [];
 let budgetAmount = 0; // 分
 let categoryBudgets = {}; // { 支出大类ID: 分 }，只按月、只针对支出大类
+let merchantRules = {}; // { 商户名: 分类ID }，账单导入确认后自动学习，越用越准
+
+// 账单导入的临时状态（不落库，刷新即弃）
+let billDraft = null;   // 解析好、等待用户确认的草稿
+let billError = null;   // 上一次解析失败的原因（含对账差异）
+let billLoading = false;
 
 // ---------- 状态 ----------
 const state = {
   tab: 'home',
-  subpage: null, // settings 下的子页：null | 'cats' | 'accts'
+  subpage: null, // settings 下的子页：null | 'cats' | 'accts' | 'catbudgets' | 'about' | 'import'
   // 记账弹层
   editingId: null,
   sheetType: 'expense',
@@ -68,16 +75,18 @@ function sumType(list, type) { return list.filter((t) => t.type === type).reduce
 
 // ---------- 数据加载 ----------
 async function loadData() {
-  const [t, c, a, budget, catBudgets] = await Promise.all([
+  const [t, c, a, budget, catBudgets, rules] = await Promise.all([
     db.txns.all(), db.categories.all(), db.accounts.all(),
     db.settings.get('monthlyBudget', 0),
     db.settings.get('categoryBudgets', {}),
+    db.settings.get('merchantRules', {}),
   ]);
   transactions = t;
   categories = c;
   accounts = a;
   budgetAmount = budget;
   categoryBudgets = (catBudgets && typeof catBudgets === 'object' && !Array.isArray(catBudgets)) ? catBudgets : {};
+  merchantRules = (rules && typeof rules === 'object' && !Array.isArray(rules)) ? rules : {};
   transactions.sort((x, y) => y.date.localeCompare(x.date) || (y.createdAt || 0) - (x.createdAt || 0));
 }
 
@@ -142,6 +151,8 @@ function render() {
   } else {
     view.innerHTML = renderSettings();
     if (state.subpage === 'catbudgets') updateCatBudgetSummary();
+    // 分类下拉的 option 整批共用一份，selected 只能在插入 DOM 后回填
+    if (state.subpage === 'import' && billDraft) syncBillSelects();
   }
   updateTabbar();
 }
@@ -466,6 +477,7 @@ function renderSettings() {
   if (state.subpage === 'accts') return renderAccountManager();
   if (state.subpage === 'catbudgets') return renderCategoryBudgetManager();
   if (state.subpage === 'about') return renderAbout();
+  if (state.subpage === 'import') return renderImportPage();
   return renderSettingsHome();
 }
 
@@ -480,6 +492,12 @@ function renderSettingsHome() {
           <div class="set-input-wrap"><span>¥</span><input id="budget-input" type="text" inputmode="decimal" value="${budgetAmount ? fmtMoneyShort(budgetAmount) : ''}" placeholder="0.00"></div>
         </div>
         <button class="primary-btn full" data-action="set-budget">保存预算</button>
+      </div>
+    </div>
+    <div class="set-group">
+      <div class="set-title">记账</div>
+      <div class="set-card">
+        <button class="set-row arrow" data-action="open-import">🧾 导入账单（微信 / 支付宝） <span>›</span></button>
       </div>
     </div>
     <div class="set-group">
@@ -757,6 +775,10 @@ async function saveSheet() {
     createdAt: existing ? existing.createdAt : Date.now(),
     updatedAt: Date.now(),
   };
+  // 这个对象是逐字段重建的，编辑一条从账单导入的记录时必须把来源单号带回去。
+  // 丢了 billNo 就等于把它降级成手记记录，下次导入同一份账单会重复入账。
+  if (existing && existing.billNo) txn.billNo = existing.billNo;
+  if (existing && existing.importBatch) txn.importBatch = existing.importBatch;
   // 保存前判断：这笔是否让某分类由「未超」变「已超」（编辑时排除这条的旧值）
   const overMsg = crossBudgetMessage(txn);
   if (state.editingId) await db.txns.update(txn);
@@ -1094,6 +1116,7 @@ function exportJSON() {
     exportedAt: new Date().toISOString(),
     budget: budgetAmount,
     categoryBudgets,
+    merchantRules,
     categories,
     accounts,
     transactions,
@@ -1118,6 +1141,7 @@ function exportCSV() {
   toast('已导出 CSV 明细');
 }
 
+const VALID_BILL_NO = /^(wx|ali):[A-Za-z0-9_-]{1,64}$/;
 function validDate(s) { return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s); }
 function validHex(c) { return typeof c === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(c); }
 function asString(v, fb) { return typeof v === 'string' ? v : fb; }
@@ -1161,17 +1185,24 @@ function sanitizeImport(raw) {
     };
   });
 
-  const txns = (Array.isArray(raw.transactions) ? raw.transactions : []).map((t) => ({
-    id: uid(),
-    type: t.type === 'income' ? 'income' : 'expense',
-    amount: Number.isFinite(t.amount) ? Math.max(0, Math.round(t.amount)) : 0,
-    categoryId: catIdMap.get(t.categoryId) || '',
-    accountId: acctIdMap.get(t.accountId) || '',
-    date: validDate(t.date) ? t.date : todayStr(),
-    note: asString(t.note, '').slice(0, 200),
-    createdAt: Number.isFinite(t.createdAt) ? t.createdAt : Date.now(),
-    updatedAt: Number.isFinite(t.updatedAt) ? t.updatedAt : Date.now(),
-  }));
+  const txns = (Array.isArray(raw.transactions) ? raw.transactions : []).map((t) => {
+    const out = {
+      id: uid(),
+      type: t.type === 'income' ? 'income' : 'expense',
+      amount: Number.isFinite(t.amount) ? Math.max(0, Math.round(t.amount)) : 0,
+      categoryId: catIdMap.get(t.categoryId) || '',
+      accountId: acctIdMap.get(t.accountId) || '',
+      date: validDate(t.date) ? t.date : todayStr(),
+      note: asString(t.note, '').slice(0, 200),
+      createdAt: Number.isFinite(t.createdAt) ? t.createdAt : Date.now(),
+      updatedAt: Number.isFinite(t.updatedAt) ? t.updatedAt : Date.now(),
+    };
+    // 账单来源单号：只接受严格格式（来源前缀 + 单号），它是去重的唯一依据，
+    // 被污染会让下次导入漏判重复。旧备份没有这两个字段，缺省即手记记录，是正确的。
+    if (VALID_BILL_NO.test(asString(t.billNo, ''))) out.billNo = t.billNo;
+    if (Number.isFinite(t.importBatch) && t.importBatch > 0) out.importBatch = t.importBatch;
+    return out;
+  });
 
   const budget = Number.isFinite(raw.budget) ? Math.max(0, Math.round(raw.budget)) : null;
 
@@ -1184,7 +1215,18 @@ function sanitizeImport(raw) {
     if (newId && Number.isFinite(v) && v > 0) budgets[newId] = Math.round(v);
   });
 
-  return { categories: cats, accounts: accts, transactions: txns, budget, categoryBudgets: budgets };
+  // 归类学习规则：键是商户名（纯文本，只用于比对，不参与渲染），值是分类 id。
+  // 值必须重映射到新 id，否则恢复出来的规则全部指向已不存在的分类。
+  const rawRules = (raw.merchantRules && typeof raw.merchantRules === 'object' && !Array.isArray(raw.merchantRules))
+    ? raw.merchantRules : {};
+  const rules = {};
+  Object.entries(rawRules).forEach(([merchant, oldCatId]) => {
+    const newId = catIdMap.get(oldCatId);
+    const key = asString(merchant, '').trim().slice(0, 80);
+    if (newId && key) rules[key] = newId;
+  });
+
+  return { categories: cats, accounts: accts, transactions: txns, budget, categoryBudgets: budgets, merchantRules: rules };
 }
 
 function importJSON(file) {
@@ -1207,6 +1249,327 @@ function importJSON(file) {
   reader.readAsText(file);
 }
 
+// ================= 账单导入 =================
+//
+// 数据流：选文件 → readBillFile() 纯本地解析 → 与账单自带的汇总硬对账 →
+// 通过才生成草稿 → 用户逐行确认 → bulkAdd 一次入库。
+//
+// 全程不联网、不上传（js/bill.js 里没有任何 fetch）。对账不通过一律拒绝入库：
+// 宁可让用户手动补记，也不能把一份解析错位的账悄悄记进去。
+
+const BILL_SOURCES = {
+  wechat: { name: '微信支付', accountId: 'acct-wechat', icon: '💚' },
+  alipay: { name: '支付宝', accountId: 'acct-alipay', icon: '💙' },
+  unknown: { name: '账单', accountId: '', icon: '🧾' },
+};
+
+let billCatOptions = null; // 分类下拉的 option HTML，整批复用同一份
+
+function defaultAccountFor(source) {
+  const want = (BILL_SOURCES[source] || BILL_SOURCES.unknown).accountId;
+  if (want && acctById(want)) return want;
+  return accounts.length ? accounts[0].id : '';
+}
+
+// 归类结果兜底：学习规则可能指向一个已被删掉的分类
+function safeCat(id, type) {
+  const c = catById(id);
+  if (c && c.type === type) return id;
+  const ps = parentsOf(type);
+  return ps.length ? ps[0].id : '';
+}
+
+// 分类下拉的全部 option，两个类型各生成一次整批复用。
+// 逐行生成的话 100 行 × 40 多个分类 = 4000+ 个 option、几百 KB 的 HTML 串，
+// 低端机会明显卡顿；共用一份后只有一行 HTML 解析的代价。
+function buildBillCatOptions() {
+  const one = (type) => parentsOf(type).map((p) => {
+    const kids = childrenOf(p.id);
+    if (!kids.length) return `<option value="${p.id}">${escapeHtml(p.icon + ' ' + p.name)}</option>`;
+    return `<optgroup label="${escapeHtml(p.icon + ' ' + p.name)}">`
+      + `<option value="${p.id}">${escapeHtml(p.name)}（整个大类）</option>`
+      + kids.map((k) => `<option value="${k.id}">${escapeHtml(k.icon + ' ' + k.name)}</option>`).join('')
+      + '</optgroup>';
+  }).join('');
+  return { expense: one('expense'), income: one('income') };
+}
+
+// 共用 option 串里没法逐行标 selected，渲染后统一按数据回填
+function syncBillSelects() {
+  if (!billDraft) return;
+  $$('#bill-rows .bill-cat').forEach((s) => {
+    const row = billDraft.rows[Number(s.dataset.billCat)];
+    if (row) s.value = row.categoryId;
+  });
+}
+
+async function onBillFile(file) {
+  billError = null;
+  billLoading = true;
+  render();
+  await new Promise((r) => setTimeout(r, 0)); // 先把「解析中」画出来，大文件时不会像卡死
+  let parsed = null;
+  try {
+    parsed = await readBillFile(file);
+  } catch (err) {
+    billError = { fileName: file.name, diffs: [err && err.message ? err.message : String(err)] };
+  }
+  billLoading = false;
+  if (parsed) {
+    // 硬闸门。要求 checked：顶部没找到自带汇总的账单无法自证，同样拒绝 ——
+    // 否则一份结构变了的文件会「对账通过（因为没有账可对）」而悄悄记错。
+    if (!parsed.checked) {
+      billError = { fileName: file.name, diffs: ['这份文件里没找到账单自带的汇总数字，无法核对，出于安全没有导入。请确认导出的是微信或支付宝的原始账单文件。'] };
+    } else if (!parsed.ok) {
+      billError = { fileName: file.name, diffs: parsed.diffs };
+    } else {
+      billDraft = buildBillDraft(parsed, file.name);
+    }
+  }
+  render();
+  window.scrollTo(0, 0);
+}
+
+function buildBillDraft(parsed, fileName) {
+  billCatOptions = buildBillCatOptions();
+  const records = parsed.records;
+  markDuplicates(records, transactions);
+  return {
+    fileName,
+    source: parsed.source,
+    encoding: parsed.encoding,
+    skipped: parsed.skipped,
+    calc: parsed.calc,
+    accountId: defaultAccountFor(parsed.source),
+    batchId: Date.now(),
+    rows: records.map((rec) => ({
+      rec,
+      // 默认勾选（产品决策）：
+      //   支付宝「账户存取」是自己账户间挪钱，既非收入也非支出 → 不勾
+      //   已经导过 / 疑似重复 → 不勾，交给用户判断
+      //   退款、微信转账红包 → 照勾并打标记
+      checked: !rec.alreadyImported && !rec.suspectDup && !rec.tags.includes('internal'),
+      categoryId: safeCat(suggestCategory(rec, merchantRules), rec.type),
+    })),
+  };
+}
+
+function renderImportPage() {
+  return billDraft ? renderImportReview() : renderImportPick();
+}
+
+function renderImportPick() {
+  return `
+  <div class="page manage-page import-page">
+    <div class="page-head"><button class="link-btn" data-action="back-settings">‹ 返回</button><span class="page-title">导入账单</span></div>
+
+    <div class="about-hero">
+      <div class="about-logo">🧾</div>
+      <div class="about-name">导入微信 / 支付宝账单</div>
+      <div class="about-slogan">一次把一个月记进来，不用一条条敲</div>
+    </div>
+
+    <div class="set-group"><div class="set-title">先说清楚</div><div class="set-card">
+      <div class="about-block">解析和入库<b>全部在这台手机里完成</b>：账单文件不会被上传到任何服务器，也不会联网。导入前你可以逐条核对、改分类、取消勾选；导错了还能一键撤销。</div>
+    </div></div>
+
+    <div class="set-group"><div class="set-title">微信怎么导出</div><div class="set-card">
+      <div class="about-block">微信 → 我 → 服务 → 钱包 → 账单 → 右上角「…」→ 账单下载 → 选「用于个人对账」→ 下载得到一个<b>压缩包</b>。<br><br>⚠️ 微信发来的是<b>加密压缩包</b>，浏览器解不开，请先用手机上的文件管理器把它<b>解压出 .xlsx</b>，再回来选这个 xlsx。</div>
+    </div></div>
+
+    <div class="set-group"><div class="set-title">支付宝怎么导出</div><div class="set-card">
+      <div class="about-block">支付宝 → 我的 → 账单 → 右上角「…」→ 开具交易流水证明 → 选「用于个人对账」→ 填邮箱，收到邮件后把 <b>.csv</b> 存到手机。</div>
+    </div></div>
+
+    ${billError ? renderBillError() : ''}
+    ${billLoading ? '<div class="empty">正在解析账单…</div>' : ''}
+
+    <button class="primary-btn full" data-action="pick-bill">选择账单文件</button>
+    <div class="import-note">支持 .xlsx（微信）和 .csv（支付宝）</div>
+  </div>`;
+}
+
+function renderBillError() {
+  return `<div class="set-group"><div class="set-card import-error">
+    <div class="import-err-title">❌ 这份账单没通过核对，已拒绝导入</div>
+    <div class="import-err-file">${escapeHtml(billError.fileName)}</div>
+    <ul class="import-err-list">${billError.diffs.map((d) => `<li>${escapeHtml(d)}</li>`).join('')}</ul>
+    <div class="about-block">为安全起见没有导入任何一条 —— 对不上账说明格式可能变了，记错账比没记更麻烦。</div>
+  </div></div>`;
+}
+
+function renderImportReview() {
+  const d = billDraft;
+  const src = BILL_SOURCES[d.source] || BILL_SOURCES.unknown;
+  const dates = d.rows.map((r) => r.rec.date).sort();
+  const acctOptions = accounts.map((a) =>
+    `<option value="${a.id}" ${d.accountId === a.id ? 'selected' : ''}>${escapeHtml(a.icon + ' ' + a.name)}</option>`).join('');
+  return `
+  <div class="page manage-page import-page">
+    <div class="page-head"><button class="link-btn" data-action="bill-reset">‹ 重选文件</button><span class="page-title">确认导入</span></div>
+
+    <div class="set-group"><div class="set-card import-summary">
+      <div class="import-head">
+        <span class="import-src">${src.icon} ${src.name}</span>
+        <span class="import-idx">共 ${d.rows.length} 条</span>
+      </div>
+      <div class="import-nums">
+        <div><span>支出</span><b class="is-out">${fmtMoney(d.calc.expense.cents)}</b></div>
+        <div><span>收入</span><b class="is-in">${fmtMoney(d.calc.income.cents)}</b></div>
+      </div>
+      <div class="import-range">${escapeHtml(dates[0] || '')} ~ ${escapeHtml(dates[dates.length - 1] || '')}${
+        d.skipped.length ? ` · 已剔除 ${d.skipped.length} 条不计收支` : ''}${
+        d.encoding === 'gbk' ? ' · 编码 GBK 已自动识别' : ''}</div>
+      <div class="import-ok">✅ 已与账单自带的汇总逐项核对一致</div>
+    </div></div>
+
+    <div class="set-group"><div class="set-card">
+      <div class="set-row"><span>账户（整批统一）</span>
+        <select id="bill-account" data-bill-account="1">${acctOptions}</select>
+      </div>
+    </div></div>
+
+    <div class="bill-bulk">
+      <button class="ghost-btn" data-action="bill-all">全选</button>
+      <button class="ghost-btn" data-action="bill-none">全不选</button>
+      <button class="ghost-btn" data-action="bill-drop">不导入转账/红包</button>
+    </div>
+
+    <div class="bill-list" id="bill-rows">${renderBillRows()}</div>
+
+    <div class="bill-footer" id="bill-footer">${billFooterHtml()}</div>
+  </div>`;
+}
+
+function renderBillRows() {
+  if (!billDraft.rows.length) return emptyHint('这份账单里没有可导入的收支记录');
+  return billDraft.rows.map((row, i) => {
+    const r = row.rec;
+    const income = r.type === 'income';
+    const tags = [];
+    if (r.tags.includes('refund')) tags.push('<span class="bill-tag tag-refund">⚠️ 退款</span>');
+    if (r.tags.includes('p2p')) tags.push('<span class="bill-tag tag-p2p">转账/红包</span>');
+    if (r.tags.includes('internal')) tags.push('<span class="bill-tag tag-internal">账户挪动</span>');
+    if (r.alreadyImported) tags.push('<span class="bill-tag tag-dup">已经导过</span>');
+    else if (r.suspectDup) tags.push('<span class="bill-tag tag-dup">疑似重复</span>');
+    const title = r.party || r.product || '（无商户名）';
+    const sub = [r.date, r.product && r.product !== r.party ? r.product : ''].filter(Boolean).join(' · ');
+    const opts = income ? billCatOptions.income : billCatOptions.expense;
+    return `<div class="bill-row${row.checked ? '' : ' is-off'}" data-bill-row="${i}">
+      <input type="checkbox" class="bill-check" data-bill-check="${i}"${row.checked ? ' checked' : ''} aria-label="勾选这条">
+      <div class="bill-main">
+        <div class="bill-top">
+          <span class="bill-party">${escapeHtml(title)}</span>
+          <span class="bill-amount ${income ? 'is-in' : 'is-out'}">${income ? '+' : '−'}${fmtMoney(r.amountCents)}</span>
+        </div>
+        <div class="bill-sub">${escapeHtml(sub)}</div>
+        ${tags.length ? `<div class="bill-tags">${tags.join('')}</div>` : ''}
+      </div>
+      <select class="bill-cat" data-bill-cat="${i}" aria-label="分类">${opts}</select>
+    </div>`;
+  }).join('');
+}
+
+function billFooterHtml() {
+  const picked = billDraft.rows.filter((r) => r.checked);
+  let out = 0;
+  picked.forEach((r) => { if (r.rec.type !== 'income') out += r.rec.amountCents; });
+  return `
+    <div class="bill-foot-nums">
+      <span>已选 <b>${picked.length}</b> / ${billDraft.rows.length} 条</span>
+      <span>支出 <b class="is-out">${fmtMoney(out)}</b></span>
+    </div>
+    <button class="primary-btn full" data-action="bill-commit"${picked.length ? '' : ' disabled'}>确认导入 ${picked.length} 条</button>`;
+}
+
+function updateBillFooter() {
+  const f = $('#bill-footer');
+  if (f && billDraft) f.innerHTML = billFooterHtml();
+}
+
+// 整列表重渲染（全选/全不选这类批量操作才用）。
+// 单行勾选不走这里 —— 那会丢焦点，也会让长列表卡。
+function refreshBillList() {
+  const box = $('#bill-rows');
+  if (!box || !billDraft) return;
+  box.innerHTML = renderBillRows();
+  syncBillSelects();
+  updateBillFooter();
+}
+
+function onBillRowCheck(input) {
+  if (!billDraft) return;
+  const row = billDraft.rows[Number(input.dataset.billCheck)];
+  if (!row) return;
+  row.checked = input.checked;
+  const box = input.closest('[data-bill-row]');
+  if (box) box.classList.toggle('is-off', !row.checked);
+  updateBillFooter();
+}
+
+function onBillRowCat(sel) {
+  if (!billDraft) return;
+  const row = billDraft.rows[Number(sel.dataset.billCat)];
+  if (row) row.categoryId = sel.value;
+}
+
+async function commitBillImport() {
+  if (!billDraft) return;
+  const picked = billDraft.rows.filter((r) => r.checked);
+  if (!picked.length) { toast('还没有勾选任何记录'); return; }
+  if (!billDraft.accountId) { toast('请先选择账户'); return; }
+
+  const batchId = billDraft.batchId;
+  const list = picked.map((r) => {
+    const t = toTxn(r.rec, { categoryId: r.categoryId, accountId: billDraft.accountId, batchId });
+    t.id = uid();
+    return t;
+  });
+
+  // 学习：把「商户 → 用户最终选的分类」记下来，下次导入优先于内置关键词。
+  // 只对支出学 —— 收入的分类通常由类型决定，记下来反而会污染规则。
+  const next = { ...merchantRules };
+  let changed = 0;
+  picked.forEach((r) => {
+    const m = (r.rec.party || '').trim().slice(0, 80);
+    if (!m || r.rec.type !== 'expense') return;
+    if (next[m] !== r.categoryId) { next[m] = r.categoryId; changed++; }
+  });
+
+  await db.txns.bulkAdd(list);
+  if (changed) {
+    merchantRules = next;
+    await db.settings.set('merchantRules', merchantRules);
+  }
+
+  billDraft = null;
+  await loadData();
+  render();
+  showImportDone(list.length, batchId, changed);
+}
+
+function showImportDone(count, batchId, learned) {
+  showModal({
+    title: '导入完成',
+    body: `<div class="confirm-msg">已导入 <b>${count}</b> 条记录。${
+      learned ? `<br><span class="import-hint">顺便记住了 ${learned} 个商户的分类，下次导入会自动套用。</span>` : ''
+    }<br><span class="import-hint">如果结果不对，可以在下面撤销；撤销只影响这一次导入的这 ${count} 条。</span></div>`,
+    actions: [
+      { label: '撤销本次导入', class: 'danger-btn', onClick: () => { hideModal(); undoImport(batchId); } },
+      { label: '好', class: 'primary-btn', onClick: hideModal },
+    ],
+  });
+}
+
+async function undoImport(batchId) {
+  const ids = transactions.filter((t) => t.importBatch === batchId).map((t) => t.id);
+  if (!ids.length) { toast('没有找到这次导入的记录'); return; }
+  await db.txns.removeMany(ids);
+  await loadData();
+  render();
+  toast(`已撤销 ${ids.length} 条`);
+}
+
 // ================= 事件绑定 =================
 function buildModal() {
   const backdrop = el('<div class="sheet-backdrop hidden" id="modal-backdrop"></div>');
@@ -1224,6 +1587,7 @@ function buildModal() {
 let importInput = null;
 function buildImportInput() {
   importInput = document.createElement('input');
+  importInput.id = 'import-json-input';
   importInput.type = 'file';
   importInput.accept = 'application/json,.json';
   importInput.style.display = 'none';
@@ -1231,6 +1595,22 @@ function buildImportInput() {
   importInput.addEventListener('change', () => {
     if (importInput.files[0]) importJSON(importInput.files[0]);
     importInput.value = '';
+  });
+}
+
+// 账单文件和 JSON 备份分开两个 input：accept 不同，混用会让手机文件选择器
+// 把 .xlsx / .csv 灰掉
+let billInput = null;
+function buildBillInput() {
+  billInput = document.createElement('input');
+  billInput.id = 'bill-file-input';
+  billInput.type = 'file';
+  billInput.accept = '.xlsx,.xlsm,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv';
+  billInput.style.display = 'none';
+  document.body.appendChild(billInput);
+  billInput.addEventListener('change', () => {
+    if (billInput.files[0]) onBillFile(billInput.files[0]);
+    billInput.value = ''; // 清空才能连续选同一个文件
   });
 }
 
@@ -1279,6 +1659,11 @@ function onViewChange(e) {
   if (t.id === 'f-cat') { state.fCategory = t.value; render(); }
   else if (t.id === 'f-acct') { state.fAccount = t.value; render(); }
   else if (t.id === 'f-month') { state.fMonth = t.value; render(); }
+  // 账单待确认行的勾选框与分类下拉。这两者都在 change 里处理，
+  // 且它们的祖先上都没有 data-action —— 否则点开下拉框会顺带触发那个动作。
+  else if (t.dataset.billCheck !== undefined) onBillRowCheck(t);
+  else if (t.dataset.billCat !== undefined) onBillRowCat(t);
+  else if (t.dataset.billAccount !== undefined && billDraft) billDraft.accountId = t.value;
 }
 
 async function onViewClick(e) {
@@ -1311,6 +1696,21 @@ async function onViewClick(e) {
     case 'export-json': exportJSON(); break;
     case 'import-json': importInput.click(); break;
     case 'export-csv': exportCSV(); break;
+    // —— 账单导入 ——
+    case 'open-import': billDraft = null; billError = null; state.subpage = 'import'; render(); break;
+    case 'bill-reset': billDraft = null; billError = null; render(); window.scrollTo(0, 0); break;
+    case 'pick-bill': if (billInput) billInput.click(); break;
+    case 'bill-all': if (billDraft) { billDraft.rows.forEach((r) => { r.checked = true; }); refreshBillList(); } break;
+    case 'bill-none': if (billDraft) { billDraft.rows.forEach((r) => { r.checked = false; }); refreshBillList(); } break;
+    case 'bill-drop': if (billDraft) {
+      // 内部账户挪动本来就是默认不勾的，这个按钮的实际作用是再拿掉微信的转账/红包
+      billDraft.rows.forEach((r) => {
+        if (r.rec.tags.includes('internal') || r.rec.tags.includes('p2p')) r.checked = false;
+      });
+      refreshBillList();
+    } break;
+    case 'bill-commit': await commitBillImport(); break;
+    case 'undo-import': await undoImport(Number(t.dataset.batch)); break;
   }
 }
 
@@ -1319,6 +1719,7 @@ async function init() {
   buildModal();
   buildIconPicker();
   buildImportInput();
+  buildBillInput();
   bindEvents();
   await ensureSeeded();
   await loadData();

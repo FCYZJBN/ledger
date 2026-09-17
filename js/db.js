@@ -85,6 +85,16 @@ export async function remove(storeName, key) {
   await txDone(tx);
 }
 
+// 批量删除（单事务）。用于「撤销本次账单导入」——一次写进来上百条，必须能一次退回。
+export async function removeMany(storeName, keys) {
+  if (!keys || !keys.length) return;
+  const db = await openDB();
+  const tx = db.transaction(storeName, 'readwrite');
+  const store = tx.objectStore(storeName);
+  keys.forEach((k) => store.delete(k));
+  await txDone(tx);
+}
+
 export async function clear(storeName) {
   const db = await openDB();
   const tx = db.transaction(storeName, 'readwrite');
@@ -93,7 +103,7 @@ export async function clear(storeName) {
 }
 
 // 原子化导入：在单个事务里清空并写入全部数据，避免中途失败导致半导入状态
-export async function importAll({ categories: cats, accounts: accts, transactions: txns, budget, categoryBudgets }) {
+export async function importAll({ categories: cats, accounts: accts, transactions: txns, budget, categoryBudgets, merchantRules }) {
   const db = await openDB();
   const tx = db.transaction(['transactions', 'categories', 'accounts', 'settings'], 'readwrite');
   const settings = tx.objectStore('settings');
@@ -108,6 +118,10 @@ export async function importAll({ categories: cats, accounts: accts, transaction
   // 分类预算同样以备份为准：没有就置空，不留旧值
   if (categoryBudgets && Object.keys(categoryBudgets).length) settings.put({ key: 'categoryBudgets', value: categoryBudgets });
   else settings.delete('categoryBudgets');
+  // 账单归类学习结果同理：老备份没有这个字段，必须清掉当前的，
+  // 否则恢复出来的记录会带着一份指向已不存在分类的旧规则
+  if (merchantRules && Object.keys(merchantRules).length) settings.put({ key: 'merchantRules', value: merchantRules });
+  else settings.delete('merchantRules');
   await txDone(tx);
 }
 
@@ -117,6 +131,7 @@ export const txns = {
   add: (t) => put('transactions', t),
   update: (t) => put('transactions', t),
   remove: (id) => remove('transactions', id),
+  removeMany: (ids) => removeMany('transactions', ids),
   bulkAdd: (list) => putMany('transactions', list),
 };
 
