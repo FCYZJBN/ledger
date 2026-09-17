@@ -71,8 +71,10 @@ function main() {
     console.log(`✅ 已创建 ${BRANCH}`);
   }
 
-  // 提示：本地与远端提交 sha 不同（内容一致），需把本地分支对齐到远端
-  console.log(`\n本地分支对齐命令：\ngit update-ref refs/heads/${BRANCH} ${commitRes.sha}`);
+  // 注意：提交由 GitHub 侧生成，本地没有这个对象，所以本地与远端「内容一致但 sha 不同」。
+  // 等 github.com 恢复后，用下面命令把本地对齐到远端，否则后续 git push 会因非快进而被拒。
+  console.log('\n⚠ 本地与远端 sha 已分叉（内容相同）。github.com 可达后执行：');
+  console.log(`  git fetch origin && git reset --hard origin/${BRANCH}`);
 }
 
 main();
