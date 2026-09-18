@@ -579,6 +579,62 @@ async function main() {
     total: netRequests.length, crossOrigin: crossOrigin.map((r) => r.url), writes: writes.map((r) => r.method + ' ' + r.url),
   }]);
 
+  // ============ Service Worker / 离线 ============
+  // 这两项必须放最后：断网用例会导航重载页面，前面用过的一切页内状态都会没。
+  //
+  // 加这两条是因为 sw.js 曾经从未被注册 —— 「离线可用」只写在 README 里，
+  // 代码里一行都没兑现，断网直接 ERR_INTERNET_DISCONNECTED，而 24 项测试
+  // 一个都没拦。文件存在不等于能力存在，所以断言要钉住三件不同的事。
+
+  // 24. 注册了、接管了、缓存里有东西。
+  //     这三者缺一不可：注册成功 ≠ controller 存在（可能还没激活），
+  //     controller 存在 ≠ 缓存非空（addAll 是全或无，任一资源 404 就整批失败）。
+  const swInfo = await evalJs(`(async () => {
+    if (!('serviceWorker' in navigator)) return { api: false };
+    const regs = await navigator.serviceWorker.getRegistrations();
+    let ready = false;
+    try {
+      await Promise.race([
+        navigator.serviceWorker.ready,
+        new Promise((_, rej) => setTimeout(() => rej(new Error('超时')), 15000)),
+      ]);
+      ready = true;
+    } catch (e) { /* ready 一直没来，下面按 ready:false 报出去 */ }
+    const names = await caches.keys();
+    let urls = [];
+    for (const n of names) {
+      // 注意别写成 urls.concat(caches.open(n).keys().then(...))：
+      // concat 不 await Promise，塞进去的是 Promise 对象本身，
+      // 后面 u.endsWith 就会炸成 "not a function"，而返回值看起来只是个空对象。
+      const keys = await (await caches.open(n)).keys();
+      urls = urls.concat(keys.map((k) => k.url));
+    }
+    return {
+      api: true, regs: regs.length, controller: !!navigator.serviceWorker.controller, ready,
+      cacheNames: names, cacheCount: urls.length,
+      hasApp: urls.some((u) => u.endsWith('/js/app.js')),
+      hasBill: urls.some((u) => u.endsWith('/js/bill.js')),
+      hasRoot: urls.some((u) => u.endsWith('/ledger/') || u.endsWith('index.html')),
+    };
+  })()`);
+  results.push(['离线·SW 注册并接管',
+    !!swInfo && swInfo.api && swInfo.regs >= 1 && swInfo.controller && swInfo.ready
+    && swInfo.cacheCount > 0 && swInfo.hasApp && swInfo.hasBill && swInfo.hasRoot, swInfo]);
+
+  // 25. 真·断网重载。
+  //     必须先 clearBrowserCache：Chrome 的普通 HTTP 缓存会把页面顶上来，
+  //     测出来是「能打开」，但那是假阳性，跟 Service Worker 毫无关系。
+  //     第一次做这个探测时我就被它骗过一次 —— 清干净才露出恐龙页。
+  await send('Network.clearBrowserCache');
+  await send('Network.emulateNetworkConditions', { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 });
+  await send('Page.navigate', { url: URL });
+  await sleep(4500);
+  const offView = await evalJs(`document.querySelector('#view') ? document.querySelector('#view').innerHTML.length : 0`);
+  const offTabs = await evalJs(`document.querySelectorAll('#tabbar .tab').length`);
+  const offText = await evalJs(`document.body ? document.body.innerText.slice(0, 60) : ''`);
+  results.push(['离线·断网仍可打开', offView > 100 && offTabs === 4,
+    { viewLen: offView, tabs: offTabs, text: String(offText).slice(0, 60) }]);
+
   console.log('EXCEPTIONS:', exceptions.length ? JSON.stringify(exceptions, null, 2) : 'none');
   let ok = true;
   for (const [name, pass, detail] of results) {

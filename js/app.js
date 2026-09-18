@@ -1727,6 +1727,21 @@ async function onViewClick(e) {
 }
 
 // ================= 启动 =================
+// 注册 Service Worker。sw.js 一直存在，但此前没人调用它 —— 于是「离线可用」
+// 只写在 README 里，代码里一行都没兑现，断网直接是 ERR_INTERNET_DISCONNECTED。
+//
+// 用 import.meta.url 而不是 './sw.js' 定位：前者的解析基准是这个模块文件本身，
+// 不管页面从哪个路径打开都对；后者以文档 URL 为基准，换路径就会失效。
+//
+// 注册失败只警告、不抛：离线是加分项，不是启动前提。App 必须照常可用，
+// 否则一个不支持 SW 的浏览器（或隐私模式）就会整站打不开。
+function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker
+    .register(new URL('../sw.js', import.meta.url))
+    .catch((err) => console.warn('Service Worker 注册失败，离线能力不可用：', err));
+}
+
 async function init() {
   buildModal();
   buildIconPicker();
@@ -1736,5 +1751,7 @@ async function init() {
   await ensureSeeded();
   await loadData();
   render();
+  // 不 await：注册是后台的事，首屏不该等它
+  registerServiceWorker();
 }
 init();
