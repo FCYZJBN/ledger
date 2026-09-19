@@ -660,6 +660,52 @@ async function main() {
     && refundRows.some((r) => r.amount === '+20.00' && r.tag === '退款'),
     refundRows]);
 
+  // ============ 退款关联原支出 ============
+  // 退款的分类不再靠商户名猜，而是从它退的那笔支出带过来，原记录打「已退款」标记。
+
+  const lastExpenseId = async () => {
+    const list = await readTxns();
+    const ex = list.filter((t) => t.type === 'expense' && t.amount > 0)
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    return ex[0] ? ex[0].id : null;
+  };
+  const sheetRefundAgainst = async (amount, targetId) => {
+    await evalJs(`document.querySelector('#fab').click()`);
+    await sleep(400);
+    await evalJs(`(() => { const i = document.querySelector('#sheet-amount'); i.value = '${amount}'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+    await evalJs(`(() => { const c = document.querySelector('#sheet-refund'); c.checked = true; c.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    await sleep(300);
+    await evalJs(`(() => { const s = document.querySelector('#refund-target'); s.value = '${targetId}'; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    await sleep(300);
+    await evalJs(`document.querySelector('#sheet-save').click()`);
+    await sleep(800);
+  };
+
+  // 先记一笔 50 的支出，再对它退 30（部分退款）
+  await sheetRecord('50.00', false);
+  const origId = await lastExpenseId();
+  await sheetRefundAgainst('30.00', origId);
+  const linked = await readTxns();
+  const origRec = linked.find((t) => t.id === origId);
+  const refundRec = linked.find((t) => t.refundOf === origId);
+
+  results.push(['退款·关联原支出并带走分类',
+    !!origRec && !!refundRec && refundRec.amount === -3000
+    && refundRec.categoryId === origRec.categoryId,
+    { orig: origRec && { amount: origRec.amount, cat: origRec.categoryId.slice(0, 8) },
+      refund: refundRec && { amount: refundRec.amount, cat: refundRec.categoryId.slice(0, 8) } }]);
+
+  // 原记录上要能看到「部分退款 30.00」—— 退满了则显示「已全额退款」
+  await evalJs(`[...document.querySelectorAll('.tab')].find((b) => b.dataset.tab === 'list').click()`);
+  await sleep(400);
+  const badge = await evalJs(`(() => {
+    const row = document.querySelector('.txn[data-id="${origId}"]');
+    const t = row && row.querySelector('.txn-tag');
+    return t ? t.textContent.trim() : '';
+  })()`);
+  results.push(['退款·原记录显示部分退款', String(badge).includes('部分退款') && String(badge).includes('30.00'),
+    { badge }]);
+
   // 备份往返：负金额必须原样回来。
   // 这条专门冲着 sanitizeImport 里曾经写着的 Math.max(0, ...) 去 ——
   // 它把退款静默清零，备份、换手机、恢复之后退款全变 0 元，且不报任何错。
@@ -683,17 +729,26 @@ async function main() {
     const txns = await new Promise((res, rej) => { const r = db.transaction('transactions', 'readonly').objectStore('transactions').getAll(); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
     db.close();
     const neg = txns.filter((t) => t.amount < 0);
+    const ids = new Set(txns.map((t) => t.id));
+    const linkedRefunds = neg.filter((t) => t.refundOf);
     return JSON.stringify({
       total: txns.length, negative: neg.length,
       amounts: neg.map((t) => t.amount).sort((a, b) => a - b),
       zeroed: txns.filter((t) => t.amount === 0).length,
+      // 导入会重建全部交易 id，refundOf 没跟着重映射就会指向一个不存在的 id。
+      // 那种情况下账仍然是对的（分类金额都独立存了），只是原记录的
+      //「已退款」标记会静默消失 —— 又是一次不报错的数据损坏。
+      linked: linkedRefunds.length,
+      linkAlive: linkedRefunds.length > 0 && linkedRefunds.every((t) => ids.has(t.refundOf)),
+      selfLink: linkedRefunds.some((t) => t.refundOf === t.id),
     });
   })()`));
-  // negative 为 2、zeroed 为 0：两笔退款（手记 -100、导入 -20）都得活着回来。
-  // 若 Math.max(0,...) 还在，这里会变成 negative:0 / zeroed:2 —— 正好被抓住。
-  results.push(['退款·备份往返不清零负金额',
-    restored.negative === 2 && restored.zeroed === 0
-    && [-10000, -2000].every((v) => restored.amounts.includes(v)), restored]);
+  // negative 为 3、zeroed 为 0：三笔退款（手记 -100、导入 -20、关联的 -30）都得活着回来。
+  // 若 Math.max(0,...) 还在，这里会变成 negative:0 / zeroed:3 —— 正好被抓住。
+  results.push(['退款·备份往返保负金额与关联',
+    restored.negative === 3 && restored.zeroed === 0
+    && [-10000, -2000, -3000].every((v) => restored.amounts.includes(v))
+    && restored.linked === 1 && restored.linkAlive && !restored.selfLink, restored]);
 
   // ============ Service Worker / 离线 ============
   // 这两项必须放最后：断网用例会导航重载页面，前面用过的一切页内状态都会没。

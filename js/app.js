@@ -42,6 +42,7 @@ const state = {
   editingId: null,
   sheetType: 'expense',
   sheetRefund: false, // 退款：勾上则这笔存成负数支出
+  sheetRefundTarget: '', // 这笔退款对应哪条原支出的 id；空 = 不指定，自己选分类
   sheetCategoryId: null,
   sheetAccountId: null,
   sheetExpanded: null,
@@ -81,6 +82,28 @@ const AMOUNT_LIMIT = 1e11;
 function clampAmount(cents) {
   if (!Number.isFinite(cents)) return 0;
   return Math.max(-AMOUNT_LIMIT, Math.min(AMOUNT_LIMIT, cents));
+}
+
+// 每条原支出被退回了多少：{ 原支出id: 分 }（正数）
+//
+// 退款是独立的负数支出记录，靠 refundOf 指回原支出，不是原记录上的一个字段。
+// 这么设计的好处是原记录被删掉也只是链接悬空，分类早就带过去了、金额也照常算，
+// 不会连带删掉退款或让汇总错乱。
+function refundTotalsByOriginal() {
+  const map = new Map();
+  transactions.forEach((t) => {
+    if (t.type !== 'expense' || t.amount >= 0 || !t.refundOf) return;
+    map.set(t.refundOf, (map.get(t.refundOf) || 0) + Math.abs(t.amount));
+  });
+  return map;
+}
+
+// 「已全额退款」还是「部分退款」—— 退满了就把原记录划掉更符合直觉
+function refundBadge(t, refunds) {
+  const back = refunds.get(t.id);
+  if (!back) return '';
+  const full = back >= Math.abs(t.amount);
+  return `<span class="txn-tag tag-refunded">${full ? '已全额退款' : '部分退款'} ${fmtMoneyShort(back)}</span>`;
 }
 
 // ---------- 数据加载 ----------
@@ -147,7 +170,12 @@ function unallocatedBalance() {
 }
 
 // ---------- 渲染入口 ----------
+// 每次整页渲染重算一次「哪笔支出被退了多少」。
+// txnRow 是 .map(txnRow) 调用的，多传参数会收到下标，所以走这个模块级缓存。
+let refundMap = new Map();
+
 function render() {
+  refundMap = refundTotalsByOriginal();
   const view = $('#view');
   if (state.tab === 'home') view.innerHTML = renderHome();
   else if (state.tab === 'list') view.innerHTML = renderList();
@@ -293,7 +321,8 @@ function txnRow(t) {
   const isRefund = isExpense && t.amount < 0;
   const sign = isExpense && !isRefund ? '-' : '+';
   const amountCls = isRefund ? 'amount-refund' : (isExpense ? 'amount-out' : 'amount-in');
-  const tag = isRefund ? '<span class="txn-tag">退款</span>' : '';
+  // 一条记录要么自己是退款，要么被退过款，两者不会同时成立
+  const tag = isRefund ? '<span class="txn-tag">退款</span>' : refundBadge(t, refundMap);
   return `
   <div class="txn" data-action="edit-txn" data-id="${t.id}">
     <span class="txn-ico" style="background:${color}22;color:${color}">${escapeHtml(icon)}</span>
@@ -584,7 +613,7 @@ function renderAbout() {
     </div></div>
 
     <div class="set-group"><div class="set-title">小技巧</div><div class="set-card">
-      <div class="about-block">• 添加到主屏幕：浏览器菜单 →「添加到主屏幕」，之后像 App 一样全屏、离线使用。<br>• <b>记退款</b>：点 ＋ 记一笔，金额填正数，勾上「这是一笔退款」—— 钱会从该分类的支出里扣回去。别记成收入：那样本月支出和收入会同时虚高，分类预算也被白白吃掉。<br>• 预算只提醒不拦截：用掉 80% 进度条变黄、超支变红。<br>• 分类预算：可给餐饮、居住等单个大类单独设预算，只设你在意的几个即可；记账刚好花超时会当场提示。<br>• 总预算 = 各分类预算合计 + 未分配：两边对不上时会问你「把总预算改为分类合计」还是「保持总额、差额记为未分配」，由你决定；未设预算的分类花钱会从未分配里扣。<br>• 分类支持两级：大类下还能建子类，图标一键点选、也可自定义。</div>
+      <div class="about-block">• 添加到主屏幕：浏览器菜单 →「添加到主屏幕」，之后像 App 一样全屏、离线使用。<br>• <b>记退款</b>：点 ＋ 记一笔，金额填正数，勾上「这是一笔退款」，再从「对应哪笔支出」里挑它退的是哪一笔 —— 分类会从那笔带过来，不用自己想。原记录会显示「已退款 / 部分退款」和被退了多少。<br>&nbsp;&nbsp;&nbsp;&nbsp;找不到原记录（消费发生在导入范围之前）就选「不指定」，自己挑个分类。<b>别记成收入</b> —— 那样本月支出和收入会同时虚高，分类预算也被白白吃掉。<br>• 预算只提醒不拦截：用掉 80% 进度条变黄、超支变红。<br>• 分类预算：可给餐饮、居住等单个大类单独设预算，只设你在意的几个即可；记账刚好花超时会当场提示。<br>• 总预算 = 各分类预算合计 + 未分配：两边对不上时会问你「把总预算改为分类合计」还是「保持总额、差额记为未分配」，由你决定；未设预算的分类花钱会从未分配里扣。<br>• 分类支持两级：大类下还能建子类，图标一键点选、也可自定义。</div>
     </div></div>
 
     <div class="set-group"><div class="set-title">版本</div><div class="set-card">
@@ -723,6 +752,7 @@ function openSheet(editingId = null, prefill = null) {
       // 退款存的是负数支出。金额框里只放绝对值，正负由「退款」勾选框表达 ——
       // 让输入框自己去处理负号，会和 sanitizeAmount 的数字清洗打架。
       state.sheetRefund = t.type === 'expense' && t.amount < 0;
+      state.sheetRefundTarget = (state.sheetRefund && t.refundOf) || '';
       state.sheetCategoryId = t.categoryId;
       state.sheetAccountId = t.accountId;
       state.sheetExpanded = null;
@@ -732,7 +762,10 @@ function openSheet(editingId = null, prefill = null) {
     }
   } else {
     state.sheetType = prefill ? (prefill.type || 'expense') : 'expense';
-    state.sheetRefund = false;
+    // 复制一条退款记录时保持它是退款；但**不带 refundOf** ——
+    // 复制出来的是一笔新交易，不是对同一笔支出的第二次退款。
+    state.sheetRefund = state.sheetType === 'expense' && !!prefill && prefill.amount < 0;
+    state.sheetRefundTarget = '';
     state.sheetCategoryId = prefill ? (prefill.categoryId || null) : null;
     state.sheetAccountId = prefill ? (prefill.accountId || accounts[0]?.id || null) : (accounts[0]?.id || null);
     state.sheetExpanded = null;
@@ -758,11 +791,38 @@ function renderSheet() {
   // 退款只对支出现有意义 —— 收入没有「退」一说，切到收入时必须收起来，
   // 否则会留下一个勾着但不起作用的开关，比没有更让人困惑。
   const isExpense = state.sheetType === 'expense';
-  if (!isExpense) state.sheetRefund = false;
+  if (!isExpense) { state.sheetRefund = false; state.sheetRefundTarget = ''; }
   $('#refund-toggle').classList.toggle('hidden', !isExpense);
   $('#sheet-refund').checked = state.sheetRefund;
+  renderRefundPicker();
   renderCatArea();
   renderAccountChips();
+}
+
+// 退款要挂在原本那笔支出上，这样分类就不用猜 —— 直接从原记录带过来。
+// 找不到原记录（消费发生在导入范围之前，或压根没记）就退回自己选分类。
+function renderRefundPicker() {
+  const show = state.sheetType === 'expense' && state.sheetRefund;
+  $('#refund-pick').classList.toggle('hidden', !show);
+  if (!show) return;
+
+  // 只有正数支出能当被退对象；退款本身不能再被退
+  const candidates = transactions
+    .filter((t) => t.type === 'expense' && t.amount > 0 && t.id !== state.editingId)
+    .slice(0, 40);
+
+  const opts = ['<option value="">不指定（自己选分类）</option>'].concat(
+    candidates.map((t) => {
+      const label = `${t.date.slice(5)} ${catFullName(t.categoryId)} ${fmtMoney(t.amount)}`;
+      return `<option value="${t.id}"${state.sheetRefundTarget === t.id ? ' selected' : ''}>${escapeHtml(label)}</option>`;
+    })
+  ).join('');
+  $('#refund-target').innerHTML = opts;
+
+  const picked = candidates.find((t) => t.id === state.sheetRefundTarget);
+  $('#refund-hint').textContent = picked
+    ? `将归入「${catFullName(picked.categoryId)}」，金额可以小于原支出（部分退款）`
+    : '不指定的话，需要自己选一个分类';
 }
 
 function renderCatArea() {
@@ -830,6 +890,9 @@ async function saveSheet() {
   // 丢了 billNo 就等于把它降级成手记记录，下次导入同一份账单会重复入账。
   if (existing && existing.billNo) txn.billNo = existing.billNo;
   if (existing && existing.importBatch) txn.importBatch = existing.importBatch;
+  // 退了哪笔：存原支出的 id。分类在上面已经从原记录带过来了，
+  // 所以即使原记录日后被删、这个链接悬空，账也不会错。
+  if (amount < 0 && state.sheetRefundTarget) txn.refundOf = state.sheetRefundTarget;
   // 保存前判断：这笔是否让某分类由「未超」变「已超」（编辑时排除这条的旧值）
   const overMsg = crossBudgetMessage(txn);
   if (state.editingId) await db.txns.update(txn);
@@ -1236,9 +1299,21 @@ function sanitizeImport(raw) {
     };
   });
 
-  const txns = (Array.isArray(raw.transactions) ? raw.transactions : []).map((t) => {
+  // 交易 id 全体重建，所以 refundOf（退款指向的原支出）必须跟着重映射。
+  // 分两趟：先建「旧 id → 新 id」的表，再回填 refundOf。
+  // 不映射的话恢复出来的退款链接全部悬空 —— 账还是对的（分类和金额早就独立存了），
+  // 但原记录上的「已退款」标记会全部消失，而且不报错。
+  const rawTxns = Array.isArray(raw.transactions) ? raw.transactions : [];
+  // 先把整张表建完再映射。边遍历边建是不行的：refundOf 指的原支出完全可能
+  // 排在退款记录后面，那时表里还没有它，链接会被当成无效直接丢掉。
+  const txnIdMap = new Map();
+  rawTxns.forEach((t) => {
+    if (typeof t.id === 'string' && t.id) txnIdMap.set(t.id, uid());
+  });
+  const txns = rawTxns.map((t) => {
+    const newTxnId = (typeof t.id === 'string' && txnIdMap.get(t.id)) || uid();
     const out = {
-      id: uid(),
+      id: newTxnId,
       type: t.type === 'income' ? 'income' : 'expense',
       // 负数金额要原样保留：退款就存成负数支出。
       // 这里曾经是 Math.max(0, ...)，会把退款静默清零 —— 备份、换手机、恢复之后
@@ -1256,6 +1331,9 @@ function sanitizeImport(raw) {
     // 被污染会让下次导入漏判重复。旧备份没有这两个字段，缺省即手记记录，是正确的。
     if (VALID_BILL_NO.test(asString(t.billNo, ''))) out.billNo = t.billNo;
     if (Number.isFinite(t.importBatch) && t.importBatch > 0) out.importBatch = t.importBatch;
+    // 退款指向的原支出；只在旧 id 确实映射到本次导入的另一条记录时才保留，
+    // 指向不存在的东西等于给自己留了个永远匹配不上的悬空键
+    if (typeof t.refundOf === 'string' && txnIdMap.has(t.refundOf)) out.refundOf = txnIdMap.get(t.refundOf);
     return out;
   });
 
@@ -1694,7 +1772,18 @@ function bindEvents() {
   $('#type-income').addEventListener('click', () => setSheetType('income'));
   $('#sheet-amount').addEventListener('input', sanitizeAmount);
   // 勾选态要同步回 state，saveSheet 读的是它；高亮由 CSS 的 :has() 负责，不必重渲染
-  $('#sheet-refund').addEventListener('change', (e) => { state.sheetRefund = e.target.checked; });
+  $('#sheet-refund').addEventListener('change', (e) => {
+    state.sheetRefund = e.target.checked;
+    if (!state.sheetRefund) state.sheetRefundTarget = '';
+    renderSheet();
+  });
+  // 选了原支出就把分类带过来（省去猜），同时给出「部分退款」的提示
+  $('#refund-target').addEventListener('change', (e) => {
+    state.sheetRefundTarget = e.target.value;
+    const src = transactions.find((t) => t.id === state.sheetRefundTarget);
+    if (src) state.sheetCategoryId = src.categoryId;
+    renderSheet();
+  });
   $('#sheet-cats').addEventListener('click', onCatAreaClick);
   $('#sheet-accounts').addEventListener('click', onAccountAreaClick);
   $('#view').addEventListener('click', onViewClick);

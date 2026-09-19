@@ -1,7 +1,7 @@
 // Service Worker：缓存静态资源，实现离线可用
 // 缓存名必须随资源列表改动一起升版：策略是 cache-first，
 // 不升版的话老用户会一直命中旧缓存，看不到新功能。
-const CACHE = 'ledger-v5';
+const CACHE = 'ledger-v6';
 const ASSETS = [
   './',
   './index.html',
