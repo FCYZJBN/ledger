@@ -2,7 +2,7 @@
 // 作为 `git push` 的兜底：把当前 HEAD 的提交内容镜像成一个提交推到远端分支
 // 用法：node scripts/deploy.mjs
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, relative, sep, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
