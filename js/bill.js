@@ -383,6 +383,24 @@ export function parseBill(rows) {
     diffs.push(`不计收支：账单声明 ${summary.neutral.count}笔，实际解析 ${neutralCount}笔`);
   }
 
+  // 对账之后才把退款行改成负数支出 —— 顺序不能反。
+  //
+  // 账单自带的汇总把退款那一行算作「收入」（微信、支付宝都是如此），而上面
+  // 的 calc 是按记录原样累加的。如果提前转换，calc.income 必然对不上
+  // summary.income，对账硬闸门会直接把整份账单拒掉，而且看起来像是解析器坏了。
+  // 对账要忠于账单口径，转成本 App 的记账口径是之后的事。
+  //
+  // 只转「收入」那一行。同一次退款在账单里还有一行原始消费（支出、状态
+  // 「已全额退款」），那笔钱当时确实花出去了，必须保持正常支出，由这行负数
+  // 去抵消，净额为 0、分类预算也不被白白占掉。
+  records.forEach((r) => {
+    if (r.type === 'income' && r.tags.includes('refund')) {
+      r.refund = true;
+      r.type = 'expense';
+      r.amountCents = -r.amountCents;
+    }
+  });
+
   return {
     source,
     header: head.header,

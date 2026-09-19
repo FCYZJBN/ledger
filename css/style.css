@@ -318,6 +318,24 @@ input, select { font-family: inherit; font-size: inherit; color: var(--text); }
   width: 70%; text-align: left; background: transparent;
 }
 
+/* 退款开关：只在「支出」页出现（收入没有退款一说）。
+   勾上后这笔存成负数支出，把该分类的花费减下去，而不是记成一笔收入。 */
+.refund-toggle {
+  display: flex; align-items: center; gap: 10px;
+  margin: 10px 0 2px; padding: 10px 12px;
+  background: var(--bg); border-radius: 10px; cursor: pointer;
+}
+.refund-toggle.hidden { display: none; }
+.refund-toggle input { width: 18px; height: 18px; flex: none; accent-color: var(--warn); }
+.refund-toggle-text { font-size: 14px; line-height: 1.35; }
+.refund-toggle-text em { display: block; font-style: normal; font-size: 12px; color: var(--text-2); margin-top: 2px; }
+.refund-toggle:has(input:checked) { background: #fff5e6; }
+
+/* 明细里退款的金额：钱是往回流，所以用收入色 + 加号，但与真实收入区分开 */
+.txn-amount.amount-refund { color: var(--income); }
+.txn-tag { font-size: 11px; padding: 1px 5px; border-radius: 4px; margin-left: 4px; vertical-align: 1px;
+  background: #fff5e6; color: var(--warn); }
+
 .sheet-section { margin-top: 14px; }
 .sheet-label { font-size: 13px; color: var(--text-2); margin-bottom: 8px; }
 .cat-area { display: flex; flex-direction: column; gap: 4px; max-height: 32vh; overflow-y: auto; }

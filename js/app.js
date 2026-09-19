@@ -41,6 +41,7 @@ const state = {
   // 记账弹层
   editingId: null,
   sheetType: 'expense',
+  sheetRefund: false, // 退款：勾上则这笔存成负数支出
   sheetCategoryId: null,
   sheetAccountId: null,
   sheetExpanded: null,
@@ -72,6 +73,15 @@ function catFullName(id) {
 }
 function rootCatId(id) { const c = catById(id); return c && c.parentId ? c.parentId : id; }
 function sumType(list, type) { return list.filter((t) => t.type === type).reduce((s, t) => s + t.amount, 0); }
+
+// 金额上限（分）：±10 亿元。个人记账不可能到这个量级，
+// 但它能挡住被篡改的备份文件塞进来的天文数字把汇总撑爆。
+// 负数要放行（退款），只卡绝对值。
+const AMOUNT_LIMIT = 1e11;
+function clampAmount(cents) {
+  if (!Number.isFinite(cents)) return 0;
+  return Math.max(-AMOUNT_LIMIT, Math.min(AMOUNT_LIMIT, cents));
+}
 
 // ---------- 数据加载 ----------
 async function loadData() {
@@ -182,7 +192,9 @@ function renderHome() {
   let budgetHtml = '';
   if (budgetAmount > 0) {
     const ratio = expense / budgetAmount;
-    const pct = Math.min(100, Math.round(ratio * 100));
+    // 下界必须卡 0：当月退款比花销还多时 expense 为负，ratio 也是负的，
+    // width 会算出个负百分比 —— 非法值，浏览器直接忽略，进度条看着像卡住了。
+    const pct = Math.max(0, Math.min(100, Math.round(ratio * 100)));
     let cls = 'budget-bar-fill';
     let status;
     if (ratio >= 1) { cls += ' over'; status = `已超支 ${fmtMoney(expense - budgetAmount)}`; }
@@ -221,7 +233,8 @@ function renderCategoryBudgetCard() {
   const rows = categoryBudgetRows(monthSpentByRootCat());
   if (!rows.length) return '';
   const body = rows.map(({ cat, limit, used, ratio }) => {
-    const pct = Math.min(100, Math.round(ratio * 100));
+    // 同理卡下界：该分类当月退款超过花销时 used 为负，ratio 也是负的
+    const pct = Math.max(0, Math.min(100, Math.round(ratio * 100)));
     let cls = 'budget-bar-fill';
     if (ratio >= 1) cls += ' over';
     else if (ratio >= 0.8) cls += ' warn';
@@ -275,17 +288,21 @@ function txnRow(t) {
   const name = catFullName(t.categoryId);
   const acct = acctById(t.accountId);
   const isExpense = t.type === 'expense';
-  const sign = isExpense ? '-' : '+';
-  const amountCls = isExpense ? 'amount-out' : 'amount-in';
+  // 退款是负数支出。它仍然是一条支出（所以归在支出类和预算体系里），
+  // 但钱是往回流，显示上加号 + 绿色 + 「退款」标签，免得看成"-¥-100.00"这种双重负号。
+  const isRefund = isExpense && t.amount < 0;
+  const sign = isExpense && !isRefund ? '-' : '+';
+  const amountCls = isRefund ? 'amount-refund' : (isExpense ? 'amount-out' : 'amount-in');
+  const tag = isRefund ? '<span class="txn-tag">退款</span>' : '';
   return `
   <div class="txn" data-action="edit-txn" data-id="${t.id}">
     <span class="txn-ico" style="background:${color}22;color:${color}">${escapeHtml(icon)}</span>
     <div class="txn-main">
-      <div class="txn-name">${escapeHtml(name)}</div>
+      <div class="txn-name">${escapeHtml(name)}${tag}</div>
       <div class="txn-sub">${escapeHtml(acct ? acct.name : '')}${t.note ? ' · ' + escapeHtml(t.note) : ''}</div>
     </div>
     <div class="txn-right">
-      <div class="txn-amount ${amountCls}">${sign}${fmtMoneyShort(t.amount)}</div>
+      <div class="txn-amount ${amountCls}">${sign}${fmtMoneyShort(Math.abs(t.amount))}</div>
       <div class="txn-actions">
         <button class="icon-btn" data-action="copy-txn" data-id="${t.id}" title="复制">📋</button>
         <button class="icon-btn" data-action="delete-txn" data-id="${t.id}" title="删除">🗑</button>
@@ -361,7 +378,7 @@ function renderList() {
       ${groups.map(([date, arr]) => {
         const de = sumType(arr, 'expense');
         return `<div class="day-group">
-          <div class="day-head"><span>${dateLabel(date)}</span><span class="day-sum">${de > 0 ? '支出 ' + fmtMoney(de) : ''}</span></div>
+          <div class="day-head"><span>${dateLabel(date)}</span><span class="day-sum">${de !== 0 ? '支出 ' + fmtMoney(de) : ''}</span></div>
           ${arr.map(txnRow).join('')}
         </div>`;
       }).join('')}
@@ -553,7 +570,7 @@ function renderAbout() {
     </div></div>
 
     <div class="set-group"><div class="set-title">账单导入的限制（先看这里）</div><div class="set-card">
-      <div class="about-block">• <b>是批量导入，不是实时记账。</b>得你主动导出账单再导进来，App 没权限也没能力在后台读微信 / 支付宝的扣款。<br>• <b>微信那一步解压躲不掉。</b>浏览器做不了 AES 解密，得先用手机或电脑把加密压缩包解开拿到 xlsx。<br>• <b>账户是整批统一的。</b>一次导入共用一个账户（微信→微信，支付宝→支付宝），不按账单里的「零钱 / 余额宝 / 银行卡」细分成不同账户。<br>• <b>自己账户之间挪钱默认不计。</b>支付宝「账户存取」（如小荷包自动攒）、微信「零钱提现」属于把左口袋的钱放进右口袋，既不是收入也不是支出，默认不勾选。<br>• <b>退款会如实进来两条。</b>账单里退款本来就是「支出 + 收入」两行，两条都留着、净额为 0，打 ⚠️ 标记好认。<br>• <b>归类是猜的，猜错请直接改。</b>支付宝自带交易分类，映射得比较准；微信没有分类列，靠商户名关键词猜。你改过的商户会被记住，下次导入同一家店就按你上次选的来。<br>• <b>重复导入是安全的。</b>每笔都带账单里的交易单号，同一份再导一次会全部标成「已导入」；日期金额方向都撞上你手记过的，会标「疑似重复」且默认不勾选，要不要记由你定。</div>
+      <div class="about-block">• <b>是批量导入，不是实时记账。</b>得你主动导出账单再导进来，App 没权限也没能力在后台读微信 / 支付宝的扣款。<br>• <b>微信那一步解压躲不掉。</b>浏览器做不了 AES 解密，得先用手机或电脑把加密压缩包解开拿到 xlsx。<br>• <b>账户是整批统一的。</b>一次导入共用一个账户（微信→微信，支付宝→支付宝），不按账单里的「零钱 / 余额宝 / 银行卡」细分成不同账户。<br>• <b>自己账户之间挪钱默认不计。</b>支付宝「账户存取」（如小荷包自动攒）、微信「零钱提现」属于把左口袋的钱放进右口袋，既不是收入也不是支出，默认不勾选。<br>• <b>退款会自动转成负数支出。</b>账单里退款是「收入」那行，导入时转成负数支出、从支出里扣掉，不会算成收入。同一次退款的原始消费行保留（那笔钱当时确实花出去了），两者相抵净额为 0。<br>• <b>归类是猜的，猜错请直接改。</b>支付宝自带交易分类，映射得比较准；微信没有分类列，靠商户名关键词猜。你改过的商户会被记住，下次导入同一家店就按你上次选的来。<br>• <b>重复导入是安全的。</b>每笔都带账单里的交易单号，同一份再导一次会全部标成「已导入」；日期金额方向都撞上你手记过的，会标「疑似重复」且默认不勾选，要不要记由你定。</div>
     </div></div>
 
     <div class="set-group"><div class="set-title">数据安全</div><div class="set-card">
@@ -567,7 +584,7 @@ function renderAbout() {
     </div></div>
 
     <div class="set-group"><div class="set-title">小技巧</div><div class="set-card">
-      <div class="about-block">• 添加到主屏幕：浏览器菜单 →「添加到主屏幕」，之后像 App 一样全屏、离线使用。<br>• 预算只提醒不拦截：用掉 80% 进度条变黄、超支变红。<br>• 分类预算：可给餐饮、居住等单个大类单独设预算，只设你在意的几个即可；记账刚好花超时会当场提示。<br>• 总预算 = 各分类预算合计 + 未分配：两边对不上时会问你「把总预算改为分类合计」还是「保持总额、差额记为未分配」，由你决定；未设预算的分类花钱会从未分配里扣。<br>• 分类支持两级：大类下还能建子类，图标一键点选、也可自定义。</div>
+      <div class="about-block">• 添加到主屏幕：浏览器菜单 →「添加到主屏幕」，之后像 App 一样全屏、离线使用。<br>• <b>记退款</b>：点 ＋ 记一笔，金额填正数，勾上「这是一笔退款」—— 钱会从该分类的支出里扣回去。别记成收入：那样本月支出和收入会同时虚高，分类预算也被白白吃掉。<br>• 预算只提醒不拦截：用掉 80% 进度条变黄、超支变红。<br>• 分类预算：可给餐饮、居住等单个大类单独设预算，只设你在意的几个即可；记账刚好花超时会当场提示。<br>• 总预算 = 各分类预算合计 + 未分配：两边对不上时会问你「把总预算改为分类合计」还是「保持总额、差额记为未分配」，由你决定；未设预算的分类花钱会从未分配里扣。<br>• 分类支持两级：大类下还能建子类，图标一键点选、也可自定义。</div>
     </div></div>
 
     <div class="set-group"><div class="set-title">版本</div><div class="set-card">
@@ -703,19 +720,23 @@ function openSheet(editingId = null, prefill = null) {
     const t = transactions.find((x) => x.id === editingId);
     if (t) {
       state.sheetType = t.type;
+      // 退款存的是负数支出。金额框里只放绝对值，正负由「退款」勾选框表达 ——
+      // 让输入框自己去处理负号，会和 sanitizeAmount 的数字清洗打架。
+      state.sheetRefund = t.type === 'expense' && t.amount < 0;
       state.sheetCategoryId = t.categoryId;
       state.sheetAccountId = t.accountId;
       state.sheetExpanded = null;
-      $('#sheet-amount').value = fmtMoneyShort(t.amount);
+      $('#sheet-amount').value = fmtMoneyShort(Math.abs(t.amount));
       $('#sheet-date').value = t.date;
       $('#sheet-note').value = t.note || '';
     }
   } else {
     state.sheetType = prefill ? (prefill.type || 'expense') : 'expense';
+    state.sheetRefund = false;
     state.sheetCategoryId = prefill ? (prefill.categoryId || null) : null;
     state.sheetAccountId = prefill ? (prefill.accountId || accounts[0]?.id || null) : (accounts[0]?.id || null);
     state.sheetExpanded = null;
-    $('#sheet-amount').value = prefill && prefill.amount ? fmtMoneyShort(prefill.amount) : '';
+    $('#sheet-amount').value = prefill && prefill.amount ? fmtMoneyShort(Math.abs(prefill.amount)) : '';
     $('#sheet-date').value = prefill && prefill.date ? prefill.date : todayStr();
     $('#sheet-note').value = prefill && prefill.note ? prefill.note : '';
   }
@@ -734,6 +755,12 @@ function renderSheet() {
   $('#sheet-title').textContent = state.editingId ? '编辑记录' : '记一笔';
   $('#type-expense').classList.toggle('is-active', state.sheetType === 'expense');
   $('#type-income').classList.toggle('is-active', state.sheetType === 'income');
+  // 退款只对支出现有意义 —— 收入没有「退」一说，切到收入时必须收起来，
+  // 否则会留下一个勾着但不起作用的开关，比没有更让人困惑。
+  const isExpense = state.sheetType === 'expense';
+  if (!isExpense) state.sheetRefund = false;
+  $('#refund-toggle').classList.toggle('hidden', !isExpense);
+  $('#sheet-refund').checked = state.sheetRefund;
   renderCatArea();
   renderAccountChips();
 }
@@ -777,8 +804,14 @@ function sanitizeAmount(e) {
 }
 
 async function saveSheet() {
-  const amount = parseAmount($('#sheet-amount').value);
-  if (amount <= 0) { toast('请输入金额'); return; }
+  // 金额框里永远是正数，符号在这一处由「退款」开关决定。
+  const raw = parseAmount($('#sheet-amount').value);
+  if (raw <= 0) { toast('请输入金额'); return; }
+  // 退款 = 负数支出。不新增 type，是因为所有汇总都长成
+  // `filter(type === 'expense').reduce((s, t) => s + t.amount, 0)` 的样子，
+  // 金额一旦可为负，支出合计、分类预算、占比环图、趋势柱图、日均全都自动算对；
+  // 若新增一个 'refund' 类型，上面每一处都得改，收益却一样。
+  const amount = state.sheetRefund && state.sheetType === 'expense' ? -raw : raw;
   if (!state.sheetCategoryId) { toast('请选择分类'); return; }
   if (!state.sheetAccountId) { toast('请选择账户'); return; }
   const existing = state.editingId ? transactions.find((x) => x.id === state.editingId) : null;
@@ -1207,7 +1240,11 @@ function sanitizeImport(raw) {
     const out = {
       id: uid(),
       type: t.type === 'income' ? 'income' : 'expense',
-      amount: Number.isFinite(t.amount) ? Math.max(0, Math.round(t.amount)) : 0,
+      // 负数金额要原样保留：退款就存成负数支出。
+      // 这里曾经是 Math.max(0, ...)，会把退款静默清零 —— 备份、换手机、恢复之后
+      // 退款全变成 0 元，还不报错。这种「数据悄悄坏了」比报错难查得多。
+      // 只挡住非有限值和超出合理范围的天文数字，别的不动。
+      amount: Number.isFinite(t.amount) ? clampAmount(Math.round(t.amount)) : 0,
       categoryId: catIdMap.get(t.categoryId) || '',
       accountId: acctIdMap.get(t.accountId) || '',
       date: validDate(t.date) ? t.date : todayStr(),
@@ -1420,6 +1457,16 @@ function renderImportReview() {
   const d = billDraft;
   const src = BILL_SOURCES[d.source] || BILL_SOURCES.unknown;
   const dates = d.rows.map((r) => r.rec.date).sort();
+  // 顶部要显示**实际入库口径**，否则会和底部汇总条对不上（看着像 bug）。
+  // 退款行已被 bill.js 转成负数支出，所以这里不能直接用 d.calc ——
+  // d.calc 是账单原始口径，拿来对账的，两者在含退款时会差一笔。
+  let refCount = 0;
+  let refCents = 0;
+  d.rows.forEach((r) => {
+    if (r.rec.refund) { refCount++; refCents += -r.rec.amountCents; }
+  });
+  const effExpense = d.calc.expense.cents - refCents;
+  const effIncome = d.calc.income.cents - refCents;
   const acctOptions = accounts.map((a) =>
     `<option value="${a.id}" ${d.accountId === a.id ? 'selected' : ''}>${escapeHtml(a.icon + ' ' + a.name)}</option>`).join('');
   return `
@@ -1432,13 +1479,15 @@ function renderImportReview() {
         <span class="import-idx">共 ${d.rows.length} 条</span>
       </div>
       <div class="import-nums">
-        <div><span>支出</span><b class="is-out">${fmtMoney(d.calc.expense.cents)}</b></div>
-        <div><span>收入</span><b class="is-in">${fmtMoney(d.calc.income.cents)}</b></div>
+        <div><span>支出</span><b class="is-out">${fmtMoney(effExpense)}</b></div>
+        <div><span>收入</span><b class="is-in">${fmtMoney(effIncome)}</b></div>
       </div>
       <div class="import-range">${escapeHtml(dates[0] || '')} ~ ${escapeHtml(dates[dates.length - 1] || '')}${
         d.skipped.length ? ` · 已剔除 ${d.skipped.length} 条不计收支` : ''}${
         d.encoding === 'gbk' ? ' · 编码 GBK 已自动识别' : ''}</div>
-      <div class="import-ok">✅ 已与账单自带的汇总逐项核对一致</div>
+      <div class="import-ok">✅ 已与账单自带的汇总逐项核对一致${
+        refCount ? `（账单口径：支出 ${fmtMoney(d.calc.expense.cents)} / 收入 ${fmtMoney(d.calc.income.cents)}）` : ''}</div>
+      ${refCount ? `<div class="import-range">含 ${refCount} 笔退款，按负数支出计入，已从支出中扣除</div>` : ''}
     </div></div>
 
     <div class="set-group"><div class="set-card">
@@ -1464,6 +1513,9 @@ function renderBillRows() {
   return billDraft.rows.map((row, i) => {
     const r = row.rec;
     const income = r.type === 'income';
+    // 退款已被 bill.js 转成负数支出：分类要按支出类选，金额显示成「+¥20.00」。
+    // 不能让它走到下面 income 那条分支，否则会渲染出「−−¥20.00」这种双重负号。
+    const refund = !!r.refund;
     const tags = [];
     if (r.tags.includes('refund')) tags.push('<span class="bill-tag tag-refund">⚠️ 退款</span>');
     if (r.tags.includes('p2p')) tags.push('<span class="bill-tag tag-p2p">转账/红包</span>');
@@ -1478,7 +1530,7 @@ function renderBillRows() {
       <div class="bill-main">
         <div class="bill-top">
           <span class="bill-party">${escapeHtml(title)}</span>
-          <span class="bill-amount ${income ? 'is-in' : 'is-out'}">${income ? '+' : '−'}${fmtMoney(r.amountCents)}</span>
+          <span class="bill-amount ${income || refund ? 'is-in' : 'is-out'}">${income || refund ? '+' : '−'}${fmtMoney(Math.abs(r.amountCents))}</span>
         </div>
         <div class="bill-sub">${escapeHtml(sub)}</div>
         ${tags.length ? `<div class="bill-tags">${tags.join('')}</div>` : ''}
@@ -1641,6 +1693,8 @@ function bindEvents() {
   $('#type-expense').addEventListener('click', () => setSheetType('expense'));
   $('#type-income').addEventListener('click', () => setSheetType('income'));
   $('#sheet-amount').addEventListener('input', sanitizeAmount);
+  // 勾选态要同步回 state，saveSheet 读的是它；高亮由 CSS 的 :has() 负责，不必重渲染
+  $('#sheet-refund').addEventListener('change', (e) => { state.sheetRefund = e.target.checked; });
   $('#sheet-cats').addEventListener('click', onCatAreaClick);
   $('#sheet-accounts').addEventListener('click', onAccountAreaClick);
   $('#view').addEventListener('click', onViewClick);

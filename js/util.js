@@ -19,16 +19,21 @@ export function uid() {
   return 'id-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 9);
 }
 
-// 分 -> 完整货币字符串，如 ¥12.34
+// 分 -> 完整货币字符串，如 ¥12.34 / -¥12.34
+//
+// 金额可以是负数了（退款记成负数支出，见 saveSheet），所以负号必须放在 ¥ 前面。
+// 直接 '¥' + n.toLocaleString() 会渲染成「¥-12.34」，既不符合中文习惯，
+// 也容易在密密麻麻的明细里看漏那个负号。
 export function fmtMoney(cents) {
   const n = (cents || 0) / 100;
-  return '¥' + n.toLocaleString('zh-CN', {
+  const sign = n < 0 ? '-¥' : '¥';
+  return sign + Math.abs(n).toLocaleString('zh-CN', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
 }
 
-// 分 -> 无货币符号的数字字符串，如 12.34
+// 分 -> 无货币符号的数字字符串，如 12.34 / -12.34
 export function fmtMoneyShort(cents) {
   const n = (cents || 0) / 100;
   return n.toLocaleString('zh-CN', {

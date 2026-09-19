@@ -447,14 +447,22 @@ async function main() {
 
   await gotoImport();
 
-  // 15. 微信 xlsx：缺行的 <row> 不影响解析，汇总逐项对上
+  // 15. 微信 xlsx：缺行的 <row> 不影响解析，汇总逐项对上。
+  //     注意这里的数字是**入库口径**，不是账单口径：账单声明 支出 36 / 收入 220，
+  //     其中 20.00 那笔退款被转成了负数支出，所以支出 36-20=16、收入 220-20=200。
+  //     bill.js 的对账用的是账单口径（转换发生在对账之后），这里断言的是转换结果。
   await injectBill(WECHAT_XLSX, 'sample-wechat.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   await waitFor(`!!document.querySelector('#bill-rows')`);
   const wx = await readReview();
-  results.push(['账单·微信xlsx解析', wx.onReview && wx.rows === 5 && wx.sumOut.includes('36.00')
-    && wx.sumIn.includes('220.00') && wx.range.includes('已剔除 1 条')
+  results.push(['账单·微信xlsx解析', wx.onReview && wx.rows === 5 && wx.sumOut.includes('16.00')
+    && wx.sumIn.includes('200.00') && wx.range.includes('已剔除 1 条')
     && wx.tags.filter((t) => t.includes('退款')).length === 2
     && wx.tags.some((t) => t.includes('转账')), wx]);
+
+  // 15b. 退款行转成负数支出后，顶部与底部汇总必须一致 ——
+  //      顶部若继续显示账单口径(36.00)而底部是 16.00，看着就像算错了。
+  results.push(['账单·退款顶部底部口径一致', wx.sumOut.includes('16.00') && wx.foot.includes('16.00'),
+    { sumOut: wx.sumOut, foot: wx.foot }]);
 
   // 16. 支付宝 CSV：GBK 自动识别；「账户存取」默认不勾
   await resetImport();
@@ -516,6 +524,17 @@ async function main() {
     billBefore: n0, after: billAfter.length, billImported: billImported.length,
     sample: billImported[0] && { billNo: billImported[0].billNo.slice(0, 8), note: billImported[0].note, batch: billImported[0].importBatch > 0 },
   }]);
+
+  // 19b. 导入的退款也要落库成负数支出，而不是一笔收入。
+  //      账单里退款是「收入」那行，但经济实质是这笔消费被撤销了。
+  //      原始消费那行（支出 20.00）必须原样保留 —— 钱当时确实花出去了。
+  const wxRefundRows = billImported.filter((t) => t.amount < 0);
+  const wxIncomes = billImported.filter((t) => t.type === 'income');
+  results.push(['退款·导入落库为负数支出',
+    wxRefundRows.length === 1 && wxRefundRows[0].type === 'expense' && wxRefundRows[0].amount === -2000
+    && wxIncomes.length === 1 && wxIncomes[0].amount === 20000,
+    { refunds: wxRefundRows.map((t) => ({ type: t.type, amount: t.amount })),
+      incomes: wxIncomes.map((t) => t.amount) }]);
   await evalJs(`[...document.querySelectorAll('#modal-foot button')].find((b) => b.textContent.trim() === '好').click()`);
   await sleep(300);
 
@@ -578,6 +597,103 @@ async function main() {
   results.push(['账单·全程零出站请求', crossOrigin.length === 0 && writes.length === 0, {
     total: netRequests.length, crossOrigin: crossOrigin.map((r) => r.url), writes: writes.map((r) => r.method + ' ' + r.url),
   }]);
+
+  // ============ 退款（手记） ============
+  // 退款记成「负数支出」，不是一笔收入。记成收入的唯一好处是结余碰巧对，
+  // 但本月支出与收入会同时虚高、分类预算被白白吃掉。下面几条钉住这一点。
+
+  const num = (s) => Number(String(s).replace(/[^\d.-]/g, ''));
+  const gotoHome = async () => {
+    await evalJs(`[...document.querySelectorAll('.tab')].find((b) => b.dataset.tab === 'home').click()`);
+    await sleep(300);
+  };
+  const readOverview = async () => JSON.parse(await evalJs(`JSON.stringify(
+    [...document.querySelectorAll('.ov-item')].map((x) => ((x.querySelector('.ov-val') || {}).textContent || '').trim())
+  )`));
+  // 走真实弹层录入：金额框只输正数，符号由「退款」勾选框决定
+  const sheetRecord = async (amount, refund) => {
+    await evalJs(`document.querySelector('#fab').click()`);
+    await sleep(400);
+    await evalJs(`(() => { const i = document.querySelector('#sheet-amount'); i.value = '${amount}'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+    if (refund) {
+      await evalJs(`(() => { const c = document.querySelector('#sheet-refund'); c.checked = true; c.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    }
+    await evalJs(`document.querySelector('.cat-parent').click()`);
+    await sleep(200);
+    await evalJs(`(document.querySelector('.cat-child') || document.querySelector('.cat-parent')).click()`);
+    await sleep(150);
+    await evalJs(`document.querySelector('#sheet-save').click()`);
+    await sleep(700);
+  };
+
+  await gotoHome();
+  const ovBase = await readOverview();
+  await sheetRecord('100.00', false);      // 花掉 100
+  await gotoHome();
+  const ovSpent = await readOverview();
+  await sheetRecord('100.00', true);       // 全额退回
+  await gotoHome();
+  const ovRefunded = await readOverview();
+
+  // 支出被减回原值，且**收入完全没动** —— 后者才是「不该记成收入」的关键。
+  results.push(['退款·抵减支出而非计入收入',
+    num(ovSpent[0]) === num(ovBase[0]) + 100
+    && num(ovRefunded[0]) === num(ovBase[0])
+    && num(ovRefunded[1]) === num(ovSpent[1]),
+    { base: ovBase, spent: ovSpent, refunded: ovRefunded }]);
+
+  // 明细里必须显示成「+¥100.00」加退款标签。
+  // 曾经会渲染成「+-100.00」这种双重负号 —— 符号来自 type，数字来自 amount，
+  // 两边各自带了负号，拼起来就废了。
+  await evalJs(`[...document.querySelectorAll('.tab')].find((b) => b.dataset.tab === 'list').click()`);
+  await sleep(400);
+  const refundRows = JSON.parse(await evalJs(`JSON.stringify(
+    [...document.querySelectorAll('.txn-amount.amount-refund')].map((a) => ({
+      amount: a.textContent.trim(), cls: a.className,
+      tag: ((a.closest('.txn').querySelector('.txn-tag') || {}).textContent || ''),
+    }))
+  )`));
+  // 此刻应有两条退款：手记的 100 和前面从微信账单导进来的 20 —— 两条路径都得显示对
+  results.push(['退款·明细显示加号与标签',
+    refundRows.length === 2
+    && refundRows.some((r) => r.amount === '+100.00' && r.tag === '退款' && r.cls.includes('amount-refund'))
+    && refundRows.some((r) => r.amount === '+20.00' && r.tag === '退款'),
+    refundRows]);
+
+  // 备份往返：负金额必须原样回来。
+  // 这条专门冲着 sanitizeImport 里曾经写着的 Math.max(0, ...) 去 ——
+  // 它把退款静默清零，备份、换手机、恢复之后退款全变 0 元，且不报任何错。
+  await evalJs(`(async () => {
+    const db = await new Promise((res, rej) => { const r = indexedDB.open('ledger-db', 1); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+    const get = (s) => new Promise((res, rej) => { const r = db.transaction(s, 'readonly').objectStore(s).getAll(); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+    const cats = await get('categories'), accts = await get('accounts'), txns = await get('transactions');
+    db.close();
+    const payload = { app: '记账本', version: 1, categories: cats, accounts: accts, transactions: txns };
+    const dt = new DataTransfer();
+    dt.items.add(new File([JSON.stringify(payload)], 'backup.json', { type: 'application/json' }));
+    const inp = document.querySelector('#import-json-input');
+    inp.files = dt.files;
+    inp.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await sleep(700);
+  await evalJs(`document.querySelector('#modal-foot .danger-btn').click()`);
+  await sleep(1100);
+  const restored = JSON.parse(await evalJs(`(async () => {
+    const db = await new Promise((res, rej) => { const r = indexedDB.open('ledger-db', 1); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+    const txns = await new Promise((res, rej) => { const r = db.transaction('transactions', 'readonly').objectStore('transactions').getAll(); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+    db.close();
+    const neg = txns.filter((t) => t.amount < 0);
+    return JSON.stringify({
+      total: txns.length, negative: neg.length,
+      amounts: neg.map((t) => t.amount).sort((a, b) => a - b),
+      zeroed: txns.filter((t) => t.amount === 0).length,
+    });
+  })()`));
+  // negative 为 2、zeroed 为 0：两笔退款（手记 -100、导入 -20）都得活着回来。
+  // 若 Math.max(0,...) 还在，这里会变成 negative:0 / zeroed:2 —— 正好被抓住。
+  results.push(['退款·备份往返不清零负金额',
+    restored.negative === 2 && restored.zeroed === 0
+    && [-10000, -2000].every((v) => restored.amounts.includes(v)), restored]);
 
   // ============ Service Worker / 离线 ============
   // 这两项必须放最后：断网用例会导航重载页面，前面用过的一切页内状态都会没。
