@@ -470,7 +470,20 @@ export function suggestCategory(record, learned = {}) {
     return 'p-income-other';
   }
   const merchant = (record.party || '').trim();
-  if (merchant && learned[merchant]) return learned[merchant];
+  // 只认**自有**属性。learned 是普通对象，`learned[merchant]` 会顺着原型链
+  // 命中山 Object.prototype 上的成员：账单里只要有个商户名**正好**叫
+  // `constructor` / `valueOf` / `toString` / `__proto__` / `isPrototypeOf`，
+  // 这里就会把一个**函数或对象**当作分类 ID 交出去。
+  // 而且它是提前 return 的，后面几轮整段跳过：商户名恰好叫 `constructor`、
+  // 商品名里写着「超市」的那种行，本该归购物，这里会退到默认分类。
+  // （实测确认：只有商户名**整个等于**那个原型成员名时才会这样；叫
+  // 「constructor 超市」不受影响，因为它不是原型上的键。）
+  // 下游有 safeCat 兜底（认不出就退回默认分类），所以目前不会把坏值写进库 ——
+  // 但那是运气不是设计：换个调用点忘了 safeCat，一个函数就会进 IndexedDB 和备份。
+  if (merchant && Object.prototype.hasOwnProperty.call(learned, merchant)) {
+    const hit = learned[merchant];
+    if (hit) return hit;
+  }
 
   if (record.alipayCat && ALIPAY_CAT_MAP[record.alipayCat]) return ALIPAY_CAT_MAP[record.alipayCat];
 

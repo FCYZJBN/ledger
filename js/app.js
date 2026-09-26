@@ -1716,6 +1716,10 @@ async function commitBillImport() {
   picked.forEach((r) => {
     const m = (r.rec.party || '').trim().slice(0, 80);
     if (!m || r.rec.type !== 'expense') return;
+    // 对普通对象给 `__proto__` 赋一个字符串是**静默无效**的（会被忽略），
+    // 于是这一条既没学进去、又把 changed 加了一，最后「记住了 N 个商户」报多。
+    // 直接跳过这类键。（读取侧同理只认自有属性，见 bill.js 的 suggestCategory。）
+    if (m === '__proto__') return;
     if (next[m] !== r.categoryId) { next[m] = r.categoryId; changed++; }
   });
 

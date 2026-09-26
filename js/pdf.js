@@ -30,12 +30,35 @@ const latin1 = (u8) => {
 
 // 解压输出的上限。gzip 炸弹是这类解析器的经典坑：几 KB 的输入能膨出几十 GB，
 // 而 arrayBuffer() 是一口气拿到全部内容才返回的 —— 也就是先 OOM 再报错。
-// 一边读一边数，超了立刻掐断。真实账单的一份内容流解压后只有几十 KB，
-// 64MB 这个上限宽松到不可能误伤正常文件，却足以挡住畸形文件把标签页拖死。
-const MAX_INFLATE_BYTES = 64 * 1024 * 1024;
+// 一边读一边数，超了立刻掐断。
+// 数值对着实测定的：真实农行账单 6 页 24 个流，**最大的一段解压后 255KB，
+// 全份合计 809KB**。16MB 是最大单流的 64 倍，正常明细不可能够到。
+const MAX_INFLATE_BYTES = 16 * 1024 * 1024;
+
+// 但**单个流**有上限不等于整份文件有上限：一份 PDF 可以有任意多个流，
+// 每个都刚好卡在上限之下，加起来照样能把内存吃光。所以还要一道**累计**预算。
+// 同样对着实测定：48MB 是全份实测总量的 60 倍，也是单流上限的三倍。
+const MAX_TOTAL_INFLATE_BYTES = 48 * 1024 * 1024;
+
+// 字符映射表的总条数上限。同样的问题换了个地方：文件里对**单条** beginbfrange
+// 有「跨度不超过 65535」的检查，但一个超长的 [<d1> <d2> …] 数组、或者很多条
+// 各自合法的 range，都不受它管，总量照样可以随便长。
+// 实测真实农行账单两个字体合计只有 283 条映射（最大的一份 273 条）。
+// 26 万条是它的 900 多倍，够装下任何一份 CJK 子集字体，又能把内存钉住。
+const MAX_CMAP_ENTRIES = 1 << 18;
+
+// 超限是主动叫停，不是「这个流解不开」。调用处对后者是容错的（退化成空流继续
+// 跑别的页），所以必须能区分 —— 否则真正的原因会被那个 catch 吞掉，
+// 最后只剩一句笼统的「没找到可识别的交易明细」。
+function tooLargeError(msg) {
+  const err = new Error(msg);
+  err.tooLarge = true;
+  return err;
+}
 
 // zlib 包装的流要用 'deflate'（不是 xlsx 那边的 'deflate-raw'，两者不能混）
-async function inflateZlib(bytes) {
+// limit 由调用方给：单流那道上限好写死，累计预算得由调用方递减着传进来。
+async function inflateZlib(bytes, limit = MAX_INFLATE_BYTES) {
   if (typeof DecompressionStream === 'undefined') {
     throw new Error('当前浏览器不支持解压 PDF，请更新浏览器后重试');
   }
@@ -48,15 +71,12 @@ async function inflateZlib(bytes) {
     const { done, value } = await reader.read();
     if (done) break;
     total += value.length;
-    if (total > MAX_INFLATE_BYTES) {
+    if (total > limit) {
       await reader.cancel();
-      const err = new Error(`这份 PDF 里有一段内容解压后超过 ${MAX_INFLATE_BYTES / 1048576}MB，`
+      // 两道上限（单流 / 整份累计）共用这句话，limit 就是当下真正生效的那个数，
+      // 所以报出来的数值永远是真的 —— 不写死「64MB」。
+      throw tooLargeError(`这份 PDF 的解压内容超过 ${Math.round(limit / 1048576)}MB，`
         + '不像是正常的交易明细，已停止解析。请确认导出的是银行的文字版明细 PDF');
-      // 打个标记：调用处对「单个流解不开」是容错的（退化成空流继续跑别的页），
-      // 但这条**不是**解不开，是主动叫停。不标记的话它会被那个 catch 吞掉，
-      // 最后变成一句笼统的「没找到可识别的交易明细」—— 真正的原因就此消失。
-      err.tooLarge = true;
-      throw err;
     }
     chunks.push(value);
   }
@@ -234,9 +254,20 @@ function parseToUnicode(text) {
   const map = new Map();
   if (!text) return map;
 
+  // 所有写入都走这里，好让「总量」也有一道上限 —— 每条 range 自己有限制，
+  // 挡不住「很多条 range」和一个超长的 [<d1> <d2> …] 数组。重复设同一个键
+  // 不占新内存，所以按 map.size 算正是要管的那个量。
+  const put = (k, v) => {
+    if (map.size >= MAX_CMAP_ENTRIES) {
+      throw tooLargeError(`这份 PDF 的字符映射表（ToUnicode）超过 ${MAX_CMAP_ENTRIES} 条，`
+        + '不像是正常的交易明细，已停止解析。请确认导出的是银行的文字版明细 PDF');
+    }
+    map.set(k, v);
+  };
+
   for (const block of text.matchAll(/beginbfchar([\s\S]*?)endbfchar/g)) {
     for (const pair of block[1].matchAll(/<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>/g)) {
-      map.set(parseInt(pair[1], 16), utf16beToStr(pair[2]));
+      put(parseInt(pair[1], 16), utf16beToStr(pair[2]));
     }
   }
 
@@ -258,14 +289,14 @@ function parseToUnicode(text) {
       for (let k = 0; k <= hi - lo; k++) {
         const u = units.slice();
         u[u.length - 1] += k;
-        map.set(lo + k, String.fromCharCode.apply(null, u));
+        put(lo + k, String.fromCharCode.apply(null, u));
       }
     }
     // 形式二：<lo> <hi> [<d1> <d2> …]
     for (const m of body.matchAll(/<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>\s*\[([\s\S]*?)\]/g)) {
       const lo = parseInt(m[1], 16);
       const items = [...m[3].matchAll(/<([0-9a-fA-F]+)>/g)];
-      items.forEach((it, k) => map.set(lo + k, utf16beToStr(it[1])));
+      items.forEach((it, k) => put(lo + k, utf16beToStr(it[1])));
     }
   }
   return map;
@@ -416,6 +447,11 @@ export async function extractPdfItems(buf) {
     }
   }
 
+  // 累计预算。单流那道上限只管得住**一段**，管不住「很多段各自卡在限下」——
+  // 一份畸形文件可以塞很多个各 16MB 的流，一段段解，内存照样被吃光。
+  // 这里把剩下的额度往下传，让 inflateZlib 在**读到一半时**就能掐断，
+  // 而不是等一整段解完才发现总量超了（那时内存已经出去了）。
+  let inflated = 0;
   for (const num of contentNums) {
     const o = objs.get(num);
     if (!o) continue;
@@ -423,8 +459,17 @@ export async function extractPdfItems(buf) {
     if (!raw) continue;
     const slice = u8.subarray(raw.start, raw.end);
     const isFlate = /\/FlateDecode/.test(raw.dict);
+    const room = MAX_TOTAL_INFLATE_BYTES - inflated;
+    if (room <= 0) {
+      // 额度已经用光，这一段连开始都不必 —— 交给 inflateZlib 的话 limit 会是 0，
+      // 报出来就变成「超过 0MB」这种莫名其妙的话。
+      throw tooLargeError(`这份 PDF 的解压内容累计超过 ${MAX_TOTAL_INFLATE_BYTES / 1048576}MB，`
+        + '不像是正常的交易明细，已停止解析。请确认导出的是银行的文字版明细 PDF');
+    }
     try {
-      _streamCache.set(num, isFlate ? await inflateZlib(slice) : slice);
+      const out = isFlate ? await inflateZlib(slice, Math.min(MAX_INFLATE_BYTES, room)) : slice;
+      inflated += out.length;
+      _streamCache.set(num, out);
     } catch (e) {
       // 解压超限是主动叫停，必须往上抛（否则会被这里吞成「没找到交易明细」）
       if (e && e.tooLarge) throw e;

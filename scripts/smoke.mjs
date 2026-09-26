@@ -933,7 +933,72 @@ async function main() {
   await sleep(2500);
   const bombRes = await readReview();
   results.push(['账单·农行解压炸弹不拖死页面',
-    bombRes.errShown && !bombRes.onReview && bombRes.errText.includes('64MB'), bombRes]);
+    bombRes.errShown && !bombRes.onReview && bombRes.errText.includes('16MB'), bombRes]);
+
+  // 35. 累计预算：**单流**上限挡不住「很多个刚好卡在限下的流」。上面那条样本只有一个流，
+  //     所以它只验了单流那道闸；这份样本四个流各 16MB，**每一个都正好卡在单流上限上**
+  //     （不超过，所以单流那道永远不响），而内存是实打实一份份堆上去的。
+  //     四份合计正好顶满 48MB 的总额度，于是第四个流还没来得及开始就该被挡下 ——
+  //     断言盯的是「报的是总额度那句话」，因为只有累计那道闸会说出它（单流那道只会说 16MB）。
+  const multiB64 = (() => {
+    const z = zlib.deflateSync(Buffer.alloc(16 * 1024 * 1024));
+    const head = ['<< /Type /Catalog /Pages 2 0 R >>',
+      '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+      '<< /Type /Page /Parent 2 0 R /Contents [4 0 R 5 0 R 6 0 R 7 0 R]'
+      + ' /Resources << >> /MediaBox [0 0 595 842] >>'];
+    const parts = [Buffer.from('%PDF-1.4\n', 'latin1')];
+    for (let i = 0; i < head.length; i++) {
+      parts.push(Buffer.from(`${i + 1} 0 obj\n${head[i]}\nendobj\n`, 'latin1'));
+    }
+    for (let i = 0; i < 4; i++) {
+      parts.push(Buffer.from(`${4 + i} 0 obj\n<< /Filter /FlateDecode /Length ${z.length} >>\nstream\n`, 'latin1'));
+      parts.push(z, Buffer.from('\nendstream\nendobj\n', 'latin1'));
+    }
+    parts.push(Buffer.from('trailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n', 'latin1'));
+    return Buffer.concat(parts).toString('base64');
+  })();
+  await reloadApp();
+  await injectBill(multiB64, '多流解压炸弹.pdf', 'application/pdf');
+  await sleep(3000);
+  const multiRes = await readReview();
+  results.push(['账单·农行多流累计不越过总预算',
+    multiRes.errShown && !multiRes.onReview && multiRes.errText.includes('48MB'), multiRes]);
+
+  // 36. 字符映射表的总条数：同一个「逐条有上限、总量没有」的毛病在 ToUnicode 上又出现一次。
+  //     单条 range 有「跨度 ≤ 65535」的检查，但**很多条各自合法的 range** 不受它管。
+  //     这份样本五条 range 各占满 65535 的跨度（每条都合法），第四条凑满总额度，
+  //     第五条的第一条映射就该被挡下。实测真实账单两个字体合计只有 283 条，
+  //     所以这道闸正常文件永远碰不到。
+  const cmapB64 = (() => {
+    const ranges = ['<0000> <FFFF> <0041>', '<10000> <1FFFF> <0041>', '<20000> <2FFFF> <0041>',
+      '<30000> <3FFFF> <0041>', '<40000> <4FFFF> <0041>'].join('\n');
+    const cmap = zlib.deflateSync(Buffer.from(
+      `/CIDInit /ProcSet findresource begin\nbegincmap\n1 beginbfrange\n${ranges}\nendbfrange\nendcmap\n`, 'latin1'));
+    const content = Buffer.from('BT /F1 12 Tf 10 10 Td <0001> Tj ET\n', 'latin1');
+    const dicts = [
+      '<< /Type /Catalog /Pages 2 0 R >>',
+      '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+      '<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> /MediaBox [0 0 595 842] >>',
+      `<< /Length ${content.length} >>`,
+      '<< /Type /Font /Subtype /Type0 /Encoding /Identity-H /ToUnicode 6 0 R >>',
+      `<< /Filter /FlateDecode /Length ${cmap.length} >>`,
+    ];
+    const parts = [Buffer.from('%PDF-1.4\n', 'latin1')];
+    dicts.forEach((d, i) => {
+      const n = i + 1;
+      if (n === 4) parts.push(Buffer.from(`${n} 0 obj\n${d}\nstream\n`, 'latin1'), content, Buffer.from('\nendstream\nendobj\n', 'latin1'));
+      else if (n === 6) parts.push(Buffer.from(`${n} 0 obj\n${d}\nstream\n`, 'latin1'), cmap, Buffer.from('\nendstream\nendobj\n', 'latin1'));
+      else parts.push(Buffer.from(`${n} 0 obj\n${d}\nendobj\n`, 'latin1'));
+    });
+    parts.push(Buffer.from('trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n', 'latin1'));
+    return Buffer.concat(parts).toString('base64');
+  })();
+  await reloadApp();
+  await injectBill(cmapB64, '字符映射表膨胀.pdf', 'application/pdf');
+  await sleep(2500);
+  const cmapRes = await readReview();
+  results.push(['账单·农行字符映射表总量有上限',
+    cmapRes.errShown && !cmapRes.onReview && cmapRes.errText.includes('262144'), cmapRes]);
 
   // ============ Service Worker / 离线 ============
   // 这两项必须放最后：断网用例会导航重载页面，前面用过的一切页内状态都会没。
