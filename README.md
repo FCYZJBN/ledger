@@ -151,7 +151,7 @@ npx serve .
 
 ```bash
 node scripts/serve.js          # 先起本地服务
-node scripts/smoke.mjs         # 端到端冒烟，45 项（渲染 / 记一笔 / 明细 / 统计 / 关于 / 图标面板 / 分类预算 / 预算联动 / 导入往返 / 账单导入 / 农行 PDF / 退款 / XSS / Service Worker / 断网重载）
+node scripts/smoke.mjs         # 端到端冒烟，48 项（渲染 / 记一笔 / 明细 / 统计 / 关于 / 图标面板 / 分类预算 / 预算联动 / 导入往返 / 账单导入 / 农行 PDF / 退款 / XSS / Service Worker / 断网重载）
 SMOKE_URL=https://fcyzjbn.github.io/ledger/ node scripts/smoke.mjs   # 直接对线上跑同一套
 node scripts/screenshot.mjs    # 重新生成 README 截图（需本地服务已起）
 ```
