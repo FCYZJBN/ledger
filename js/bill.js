@@ -1,7 +1,12 @@
-// 账单解析：微信 xlsx + 支付宝 CSV
+// 账单解析：微信 xlsx + 支付宝 CSV + 农行 PDF
 //
 // 全程纯函数、零网络请求 —— 账单内容绝不离开本机。
 // 这里不做任何 fetch / XHR / 上报，输入是用户选的文件，输出是内存里的记录。
+//
+// PDF 的字节层解析在 js/pdf.js（只负责把字节变成「带坐标的文字」），
+// 这里负责把那些文字按 x 坐标还原成表格 —— 换一家银行只改这一层。
+
+import { extractPdfItems } from './pdf.js';
 
 // ================= 通用工具 =================
 
@@ -383,6 +388,10 @@ export function parseBill(rows) {
     diffs.push(`不计收支：账单声明 ${summary.neutral.count}笔，实际解析 ${neutralCount}笔`);
   }
 
+  // 给退款行挂上它抵掉的那笔原支出。必须赶在下面的翻转之前：
+  // 配对靠的是「一收一支」，翻转之后就都是一样的负数支出了，分不出来。
+  pairRefunds(records);
+
   // 对账之后才把退款行改成负数支出 —— 顺序不能反。
   //
   // 账单自带的汇总把退款那一行算作「收入」（微信、支付宝都是如此），而上面
@@ -469,9 +478,14 @@ export function suggestCategory(record, learned = {}) {
   // 合并成一个字符串会让商品名里的词抢走商户名的判断 ——
   // 「永辉超市」买瓶农夫山泉，合并匹配会命中商品里的「农夫山泉」归成餐饮，
   // 分轮之后超市仍归购物，而自动售货机（商户无规则）才由商品兜底归餐饮。
+  //
+  // 农行的交易附言（memo）排在最后兜底：银行的「对手信息」列常常被截断
+  // （「支付宝-消费高德打」），完整商户名反而在附言里。它排在商品名之后，
+  // 不会抢走前两轮的判断。
   const party = (record.party || '').toLowerCase();
   const product = (record.product || '').toLowerCase();
-  for (const field of [party, product]) {
+  const memo = (record.memo || '').toLowerCase();
+  for (const field of [party, product, memo]) {
     if (!field) continue;
     for (const [keywords, cat] of MERCHANT_RULES) {
       if (keywords.some((k) => field.includes(k.toLowerCase()))) return cat;
@@ -482,29 +496,300 @@ export function suggestCategory(record, learned = {}) {
 
 // ================= 去重 =================
 
-// 精确层：账单交易单号（带来源前缀，两套单号都是纯数字，避免跨平台撞号）
-// 模糊层：同日同金额同方向，且那条是手记的（没有 billNo）
+// 精确层：账单交易单号（带来源前缀，各套单号都是纯数字，避免跨平台撞号）
+// 模糊层：同日同金额同方向。对两类记录分别配额：
+//   手记记录（没有 billNo）—— 同一笔钱手记过一次，账单里再出现就是重复
+//   别的来源导进来的记录 —— 同一笔消费在农行和支付宝各出现一次，是同一笔钱
 //
 // 模糊层必须做「组内配额对账」：实测两份账单里都存在真实的同日同金额独立交易，
-// 朴素匹配会把它们全部误标。手记记录只能抵消同样数量的账单行。
+// 朴素匹配会把它们全部误标。配额有多少，才能标多少行。
+//
+// 跨来源配额按**前缀**分别统计：同源记录不参与（同源重复由精确层兜住，
+// 同源同额不同单号是两笔真交易）。这样先导农行再导支付宝、或者反过来，
+// 结果一致 —— 对称的，不会因为导入顺序换一个结果。
+const billPrefix = (no) => (no ? String(no).split(':')[0] : '');
+
 export function markDuplicates(records, existingTxns = []) {
   const seenBillNo = new Set();
   const manual = new Map();
+  const cross = new Map();          // key -> Map(来源前缀 -> 条数)
   existingTxns.forEach((t) => {
-    if (t.billNo) { seenBillNo.add(t.billNo); return; }
     const k = `${t.date}|${t.amount}|${t.type}`;
-    manual.set(k, (manual.get(k) || 0) + 1);
+    if (!t.billNo) {
+      manual.set(k, (manual.get(k) || 0) + 1);
+      return;
+    }
+    seenBillNo.add(t.billNo);
+    if (!cross.has(k)) cross.set(k, new Map());
+    const m = cross.get(k);
+    const p = billPrefix(t.billNo);
+    m.set(p, (m.get(p) || 0) + 1);
   });
 
   const seenKey = new Map();
   records.forEach((r) => {
     r.alreadyImported = !!r.billNo && seenBillNo.has(r.billNo);
     const k = `${r.date}|${r.amountCents}|${r.type}`;
+    let quota = manual.get(k) || 0;
+    const m = cross.get(k);
+    if (m) {
+      const own = billPrefix(r.billNo);
+      for (const [p, n] of m) if (p !== own) quota += n;
+    }
     const n = seenKey.get(k) || 0;
     seenKey.set(k, n + 1);
-    r.suspectDup = !r.alreadyImported && n < (manual.get(k) || 0);
+    // alreadyImported 短路：同一份账单重复导入时，精确层已经认出来了，
+    // 不该再被自己的模糊配额标成「疑似重复」。
+    r.suspectDup = !r.alreadyImported && n < quota;
   });
   return records;
+}
+
+// ================= 退款配对 =================
+
+const REFUND_WINDOW_DAYS = 30;
+
+// 日期 → 天数（只有 YYYY-MM-DD 一种格式，全程 UTC，不受时区影响）
+function dayNum(d) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d || '');
+  if (!m) return null;
+  return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) / 86400000;
+}
+
+// 在 records[i] 之前找它的原支出：对手信息完全相同、金额绝对值相同、
+// 方向相反、时间更早且在 30 天内。
+//
+// 对手信息必须完全相等，这是关键的消歧手段：实测有一组「同一天 1 收 2 支、
+// 金额都是 20.10」，但三笔的对手串只有一笔与收款方完全一致（另外那笔的
+// 对手串截断位置不同），精确匹配后唯一，朴素按金额配会配错。
+// 多个候选取时间最晚的那笔：连着买两次退其中一次，退的是最近那笔。
+function findRefundSource(records, i) {
+  const r = records[i];
+  const key = (r.party || '').trim();
+  if (!key) return -1;
+  const want = Math.abs(r.amountCents);
+  const rd = dayNum(r.date);
+  let best = -1;
+  for (let j = 0; j < i; j++) {
+    const p = records[j];
+    if (p.type === r.type) continue;
+    if (Math.abs(p.amountCents) !== want) continue;
+    if ((p.party || '').trim() !== key) continue;
+    const pd = dayNum(p.date);
+    if (rd != null && pd != null && (pd > rd || rd - pd > REFUND_WINDOW_DAYS)) continue;
+    // 取日期最晚的；同一天则取靠后的那笔
+    if (best < 0 || records[best].date <= p.date) best = j;
+  }
+  return best;
+}
+
+// 微信 / 支付宝自带的「退款」状态已经标出了哪些是退款行，这里只负责
+// 把它们指回原支出。农行的退款认定方式不同（见 parseAbcBill），
+// 但「谁是谁的原支出」这段判断是同一套，所以两边共用 findRefundSource。
+export function pairRefunds(records) {
+  let n = 0;
+  records.forEach((r, i) => {
+    if (r.type !== 'income' || !r.tags.includes('refund')) return;
+    const j = findRefundSource(records, i);
+    if (j >= 0) { r.refundOfIdx = j; n++; }
+  });
+  return n;
+}
+
+// ================= 农行 PDF（表格重建）=================
+//
+// 农行导出的明细是**绝对定位**排版：每个单元格自己一条
+// `BT / 1 0 0 1 x y Tm / /F1 5.5 Tf / (…) Tj / ET`，文件里没有「行」这个概念，
+// 也没有表格线可依。所以只能靠 x 坐标把文字重新灌回列里。
+//
+// 列边界取自实测的表头各列 x（52 / 97.18 / 137.61 / 178.03 / 218.46 /
+// 258.89 / 311.20 / 356.38 / 396.81），在相邻两列中间的空当分桶。
+// 刻意按坐标而不按列名认列：最后一页的表头措辞与前面几页不同
+// （账户余额/对方信息/交易类型），按名字认会在那一页整页失配。
+const ABC_BUCKETS = [
+  [80, 'date'], [120, 'time'], [160, 'summary'], [200, 'amount'],
+  [240, 'balance'], [300, 'party'], [345, 'logNo'], [385, 'channel'],
+];
+const ABC_FIELDS = ['date', 'time', 'summary', 'amount', 'balance', 'party', 'logNo', 'channel', 'note'];
+
+function abcBucket(x) {
+  for (const [limit, name] of ABC_BUCKETS) if (x < limit) return name;
+  return 'note';
+}
+
+// 同一记录内的折行、相邻两条记录、以及页脚，三者的行距差得很开
+// （实测 5.5 / 15.0 / 23.5+），判定窗口就放在这段空白里。
+//
+// 不能简单写成「x 落在对手信息或附言桶里就算折行」：页码「第6页，共6页」的
+// x=270.5 正好落在对手信息桶内，那样会被并进最后一条记录里。
+const ABC_CONT_GAP = 8;
+
+export function abcRows(items) {
+  const sorted = [...items].sort((a, b) => a.page - b.page || b.y - a.y || a.x - b.x);
+  const rows = [];
+  let cur = null;
+  let lastY = 0;
+  let curPage = -1;
+  for (const it of sorted) {
+    if (it.page !== curPage) { curPage = it.page; cur = null; }
+    const text = String(it.text == null ? '' : it.text).trim();
+    if (!text) continue;
+    // 新记录：首格是 8 位日期。表头行首格是「交易日期」，自然落不进来。
+    if (it.x < 80 && /^\d{8}$/.test(text)) {
+      cur = {};
+      ABC_FIELDS.forEach((f) => { cur[f] = ''; });
+      cur[abcBucket(it.x)] += text;
+      rows.push(cur);
+      lastY = it.y;
+      continue;
+    }
+    // 页眉、页脚、免责声明、页码：没开始记录，或者离上一条太远
+    if (!cur || it.y > lastY || lastY - it.y > ABC_CONT_GAP) continue;
+    lastY = it.y;                       // 折行：把这一行也算进当前记录，供下一行比距离
+    cur[abcBucket(it.x)] += text;
+  }
+  return rows;
+}
+
+// 20260627 → 2026-06-27
+function abcDate(s) {
+  const m = /^(\d{4})(\d{2})(\d{2})$/.exec(String(s).trim());
+  if (!m) return null;
+  return `${m[1]}-${m[2]}-${m[3]}`;
+}
+
+export function parseAbcBill(items) {
+  const rows = abcRows(items);
+  if (!rows.length) {
+    throw new Error('这份 PDF 里没找到可识别的交易明细。如果这是扫描件或图片版账单，'
+      + '解析不出文字，请改用农行导出的文字版 PDF');
+  }
+
+  // 余额闸门。农行 PDF **没有**汇总行（现有微信/支付宝那条「账单自证」的路
+  // 走不通），但它给了个更强的东西：每行都带「本次余额」，上一条余额 +
+  // 本条金额 = 本条余额。比一个汇总总额强得多 —— 汇总对得上也挡不住
+  // 「某一行金额记错、另一行反过来错」这种交叉错误，逐行余额挡得住。
+  const bad = rows.findIndex((r) => billAmountToCents(r.balance) == null);
+  if (bad >= 0) {
+    throw new Error(`这份 PDF 第 ${bad + 1} 行缺少「本次余额」，无法逐行核对。`
+      + '请确认导出的是农行的账户活期交易明细清单（文字版 PDF）');
+  }
+
+  const diffs = [];
+  for (let i = 1; i < rows.length; i++) {
+    const amt = billAmountToCents(rows[i].amount);
+    if (amt == null) continue;          // 金额本身坏掉的行，下面会按行报「金额无法识别」
+    const prev = billAmountToCents(rows[i - 1].balance);
+    const cur = billAmountToCents(rows[i].balance);
+    if (prev + amt !== cur) {
+      const d = abcDate(rows[i].date);
+      diffs.push(`第 ${i + 1} 行${d ? `（${d}）` : ''}余额对不上：`
+        + `上一条余额 ${(prev / 100).toFixed(2)} + 本条金额 ${(amt / 100).toFixed(2)}`
+        + ` ≠ 本条余额 ${(cur / 100).toFixed(2)}`);
+    }
+  }
+
+  const records = [];
+  const skipped = [];
+  rows.forEach((r, i) => {
+    const date = abcDate(r.date);
+    if (!date) { skipped.push({ date: r.date, raw: r.date, reason: '日期无法识别' }); return; }
+    const signed = billAmountToCents(r.amount);
+    // 0 元（实测有一条「利息税 +0.00」）走「金额无法识别」，与另两条路径
+    // 用同一个字面量 —— 换新的 reason 会让下游的中性交易计数漏算。
+    if (signed == null || signed === 0) {
+      skipped.push({ date, raw: r.amount, reason: '金额无法识别' });
+      return;
+    }
+    const summary = r.summary;
+    const memo = r.note;
+    const hay = summary + memo;
+    const tags = [];
+    // 自己账户之间挪钱：钱确实动了，但既不是收入也不是支出 → 默认不勾。
+    //
+    // 这三条判定必须排在「代付/转账」之前：实测 5 笔摘要为「代付」的记录，
+    // 附言全都是「微信零钱提现财付通」—— 那是把自己的零钱提回银行卡，
+    // 不是别人转来的钱。按摘要先后判会把 9700 元自己的钱标成「他人转入」。
+    if (hay.includes('小荷包') || hay.includes('微信零钱') || (memo.includes('抖音') && memo.includes('提现'))) {
+      tags.push('internal');
+    } else if (summary === '代付' || summary === '转账') {
+      // 「转支」不在此列：实测那一笔是付给上海公共交通卡的 30 元消费，
+      // 是真支出。按转账处理会默认不勾选，用户会静默少记 30 元。
+      tags.push('p2p');
+    }
+    records.push({
+      source: 'abc',
+      date,
+      // 农行账单里方向就在金额的正负号上（没有「收/支」列），但本 App 的
+      // 记账口径是「支出记正数、退款记负数」。所以这里要取绝对值再配 type：
+      // 原样把 -20.10 存成支出的话，支出合计会变成负数，而且农行的 -2010
+      // 和支付宝的 +2010 永远对不上键，跨来源去重会整个失效。
+      type: signed > 0 ? 'income' : 'expense',
+      amountCents: Math.abs(signed),
+      party: r.party === '--' ? '' : r.party,
+      product: '',                 // 农行没有商品/说明列
+      memo,                        // 交易附言：商户信息（高德打车等）在这儿，参与自动归类但不进备注
+      status: '',
+      txnType: summary,
+      alipayCat: '',
+      payWay: r.channel,
+      note: '',
+      orderNo: r.logNo,
+      // 必须带时间：实测日志号并不唯一（结息与利息税都是 0000000001），不能假定它唯一。
+      // 全部落在 [A-Za-z0-9_-] 内，过得了 app.js 的 VALID_BILL_NO 白名单。
+      billNo: r.logNo
+        ? `abc:${r.date}${r.time}-${r.logNo}`
+        : `abc:${r.date}${r.time}-r${i}`,     // 没日志号时用行号兜底（同一份文件里稳定）
+      tags,
+    });
+  });
+
+  // 账单口径的收支合计 —— 要在翻转之前算，理由同 parseBill：
+  // 农行把退款那一行算作收入，对账要忠于账单口径。
+  const calc = {
+    income: { count: 0, cents: 0 },
+    expense: { count: 0, cents: 0 },
+  };
+  records.forEach((r) => {
+    const b = r.type === 'income' ? calc.income : calc.expense;
+    b.count++; b.cents += r.amountCents;
+  });
+
+  // 退款认定。农行账单里**没有任何**「退款」字样，只能反推：
+  // 一笔进来的钱，如果前面有一笔对手信息完全相同、金额相同、方向相反的支出，
+  // 那它就是那笔支出的退款。
+  //
+  // 必须在余额闸门之后 —— 闸门跑在 rows 上、用的是原始带符号金额；
+  // 提前翻转会让每一行的余额都对不上，而且看起来像解析器坏了。
+  records.forEach((r, i) => {
+    if (r.type !== 'income') return;
+    const j = findRefundSource(records, i);
+    if (j >= 0) r.refundOfIdx = j;
+  });
+  records.forEach((r) => {
+    if (r.refundOfIdx == null) return;
+    r.refund = true;
+    r.tags.push('refund');
+    r.type = 'expense';
+    r.amountCents = -r.amountCents;
+  });
+
+  return {
+    source: 'abc',
+    header: null,
+    records,
+    skipped,
+    // 农行 PDF 没有汇总行，这三个数字天然为空 —— 下游对账文案要按来源分支，
+    // 不能照搬微信/支付宝那句「已与账单自带的汇总逐项核对一致」。
+    summary: { total: null, income: null, expense: null, neutral: null },
+    calc,
+    // 逐行余额全部对上才算「可对账」。语义与另两条路径的 checked 一致：
+    // 账单自证不了就不许入库。
+    checked: diffs.length === 0,
+    balanceRows: rows.length,
+    diffs,
+    ok: diffs.length === 0,
+  };
 }
 
 // ================= 统一入口 =================
@@ -514,6 +799,14 @@ export async function readBillFile(file) {
   const name = (file.name || '').toLowerCase();
   let rows;
   let encoding = 'utf-8';
+  // 除了扩展名，也认魔数：有的手机从文件管理器分享过来时文件名是乱的
+  const isPdf = name.endsWith('.pdf')
+    || new TextDecoder('latin1').decode(new Uint8Array(buf, 0, Math.min(5, buf.byteLength))) === '%PDF-';
+  if (isPdf) {
+    const parsed = parseAbcBill(await extractPdfItems(buf));
+    parsed.encoding = encoding;
+    return parsed;
+  }
   if (name.endsWith('.xlsx') || name.endsWith('.xlsm')) {
     rows = await readXlsx(buf);
   } else {

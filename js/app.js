@@ -543,7 +543,7 @@ function renderSettingsHome() {
     <div class="set-group">
       <div class="set-title">记账</div>
       <div class="set-card">
-        <button class="set-row arrow" data-action="open-import">🧾 导入账单（微信 / 支付宝） <span>›</span></button>
+        <button class="set-row arrow" data-action="open-import">🧾 导入账单（微信 / 支付宝 / 农行） <span>›</span></button>
       </div>
     </div>
     <div class="set-group">
@@ -590,16 +590,17 @@ function renderAbout() {
       <div class="about-block"><b>1.</b> 点底部 ＋，输入金额、选分类、选账户，保存即可（默认今天）。<br><b>2.</b> 首页看本月收支与预算，明细按日期回看，统计看图表。<br><b>3.</b> 设置里可自定义分类、账户，设每月总预算和分类预算。</div>
     </div></div>
 
-    <div class="set-group"><div class="set-title">导入账单（微信 / 支付宝）</div><div class="set-card">
+    <div class="set-group"><div class="set-title">导入账单（微信 / 支付宝 / 农行）</div><div class="set-card">
       <div class="about-block">把导出的账单文件丢进来，自动解析、归类，你过一遍确认就入账。<b>文件只在你手机里解析，一个字都不往外发。</b><br><br>
       <b>微信</b>：我 → 服务 → 钱包 → 账单 → 常见问题 → 下载账单 → 用于个人对账，选时间范围，填邮箱收文件。微信发来的是<b>加密压缩包</b>，需要先解压出里面的 <b>.xlsx</b> 再导进来（App 不解压加密包）。<br><br>
       <b>支付宝</b>：我的 → 账单 → 右上角 ⋯ → 开具交易流水证明 → 用于个人对账，选时间范围，填邮箱收文件。下载到的是 <b>.csv</b>，直接导。<br><br>
-      导进来后会先<b>对账</b>：解析出的条数与收支合计必须和账单自带的汇总完全一致，对不上就拒绝导入——格式变了宁可报错，也不让错账进来。对上了才进待确认页，逐行可勾选、可改分类，底部显示「已选几条、合计多少」。<br><br>
+      <b>农业银行</b>：农行 App → 我的账户 → 选那张卡 → 交易明细 → 选起止日期 → 导出 <b>.pdf</b>。要<b>文字版</b>（能选中文字的），扫描件 / 截图解析不出来。<br><br>
+      导进来后会先<b>对账</b>：微信 / 支付宝要求解析出的条数与收支合计和账单自带的汇总完全一致；农行没有汇总行，改用<b>逐行余额连续性</b>核对（上一条余额 + 本条金额 = 本条余额），这比汇总总额更强——汇总对得上也挡不住「某行记错、另一行反过来错」。两种情况任一不满足都拒绝导入，格式变了宁可报错，也不让错账进来。对上了才进待确认页，逐行可勾选、可改分类，底部显示「已选几条、合计多少」。<br><br>
       确认导入后结果块有「<b>撤销本次导入</b>」，整批一次退回，不用一条条删。</div>
     </div></div>
 
     <div class="set-group"><div class="set-title">账单导入的限制（先看这里）</div><div class="set-card">
-      <div class="about-block">• <b>是批量导入，不是实时记账。</b>得你主动导出账单再导进来，App 没权限也没能力在后台读微信 / 支付宝的扣款。<br>• <b>微信那一步解压躲不掉。</b>浏览器做不了 AES 解密，得先用手机或电脑把加密压缩包解开拿到 xlsx。<br>• <b>账户是整批统一的。</b>一次导入共用一个账户（微信→微信，支付宝→支付宝），不按账单里的「零钱 / 余额宝 / 银行卡」细分成不同账户。<br>• <b>自己账户之间挪钱默认不计。</b>支付宝「账户存取」（如小荷包自动攒）、微信「零钱提现」属于把左口袋的钱放进右口袋，既不是收入也不是支出，默认不勾选。<br>• <b>退款会自动转成负数支出。</b>账单里退款是「收入」那行，导入时转成负数支出、从支出里扣掉，不会算成收入。同一次退款的原始消费行保留（那笔钱当时确实花出去了），两者相抵净额为 0。<br>• <b>归类是猜的，猜错请直接改。</b>支付宝自带交易分类，映射得比较准；微信没有分类列，靠商户名关键词猜。你改过的商户会被记住，下次导入同一家店就按你上次选的来。<br>• <b>重复导入是安全的。</b>每笔都带账单里的交易单号，同一份再导一次会全部标成「已导入」；日期金额方向都撞上你手记过的，会标「疑似重复」且默认不勾选，要不要记由你定。</div>
+      <div class="about-block">• <b>是批量导入，不是实时记账。</b>得你主动导出账单再导进来，App 没权限也没能力在后台读微信 / 支付宝的扣款。<br>• <b>微信那一步解压躲不掉。</b>浏览器做不了 AES 解密，得先用手机或电脑把加密压缩包解开拿到 xlsx。<br>• <b>账户是整批统一的。</b>一次导入共用一个账户（微信→微信，支付宝→支付宝），不按账单里的「零钱 / 余额宝 / 银行卡」细分成不同账户。<br>• <b>自己账户之间挪钱默认不计。</b>支付宝「账户存取」（如小荷包自动攒）、微信「零钱提现」属于把左口袋的钱放进右口袋，既不是收入也不是支出，默认不勾选。<br>• <b>退款会自动转成负数支出。</b>账单里退款是「收入」那行，导入时转成负数支出、从支出里扣掉，不会算成收入。同一次退款的原始消费行保留（那笔钱当时确实花出去了），两者相抵净额为 0。<br>• <b>归类是猜的，猜错请直接改。</b>支付宝自带交易分类，映射得比较准；微信没有分类列，靠商户名关键词猜。你改过的商户会被记住，下次导入同一家店就按你上次选的来。<br>• <b>重复导入是安全的。</b>每笔都带账单里的交易单号，同一份再导一次会全部标成「已导入」；日期金额方向都撞上你手记过的、<b>或撞上别的来源导进来的</b>，会标「疑似重复」且默认不勾选，要不要记由你定。<br>• <b>农行卡 + 支付宝别同时导。</b>同一笔刷卡消费两边都有（实测一份月账单全量重合）。App 会自动标重复并默认不勾，但要你逐条过一遍 —— <b>同一个月只导一边</b>更省事：银行是总账（什么都记），平台是明细（只知道该平台的）。<br>• <b>农行只吃文字版 PDF，且不支持对象流 / 加密 PDF。</b>现在能解析是因为农行导出的是老式结构、没加密。将来换成别的结构会明确报错并说明原因，不会静默导成空账。<br>• <b>农行对账失败会拒绝整份。</b>若账单本身有未列出的交易导致余额跳变，整份会被拒绝并指明断在第几行。这是有意的：宁可让你去银行重导一份，也不让可疑的账悄悄进来。</div>
     </div></div>
 
     <div class="set-group"><div class="set-title">数据安全</div><div class="set-card">
@@ -1255,7 +1256,9 @@ function exportCSV() {
   toast('已导出 CSV 明细');
 }
 
-const VALID_BILL_NO = /^(wx|ali):[A-Za-z0-9_-]{1,64}$/;
+// 白名单。加了新的账单来源必须在这里加前缀，漏了不会报错 ——
+// 备份导出正常、恢复之后 billNo 被静默剥掉，去重就悄悄失效了。
+const VALID_BILL_NO = /^(wx|ali|abc):[A-Za-z0-9_-]{1,64}$/;
 function validDate(s) { return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s); }
 function validHex(c) { return typeof c === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(c); }
 function asString(v, fb) { return typeof v === 'string' ? v : fb; }
@@ -1393,6 +1396,7 @@ function importJSON(file) {
 const BILL_SOURCES = {
   wechat: { name: '微信支付', accountId: 'acct-wechat', icon: '💚' },
   alipay: { name: '支付宝', accountId: 'acct-alipay', icon: '💙' },
+  abc: { name: '农业银行', accountId: 'acct-bank', icon: '🏦' },
   unknown: { name: '账单', accountId: '', icon: '🧾' },
 };
 
@@ -1451,7 +1455,11 @@ async function onBillFile(file) {
   if (parsed) {
     // 硬闸门。要求 checked：顶部没找到自带汇总的账单无法自证，同样拒绝 ——
     // 否则一份结构变了的文件会「对账通过（因为没有账可对）」而悄悄记错。
-    if (!parsed.checked) {
+    if (!parsed.checked && parsed.source === 'abc' && parsed.diffs.length) {
+      // 农行的 checked 就是余额连续性，diffs 里已经写明断在第几行 ——
+      // 直接给它，比一句笼统的「无法核对」有用得多
+      billError = { fileName: file.name, diffs: parsed.diffs };
+    } else if (!parsed.checked) {
       billError = { fileName: file.name, diffs: ['这份文件里没找到账单自带的汇总数字，无法核对，出于安全没有导入。请确认导出的是微信或支付宝的原始账单文件。'] };
     } else if (!parsed.ok) {
       billError = { fileName: file.name, diffs: parsed.diffs };
@@ -1475,8 +1483,9 @@ function buildBillDraft(parsed, fileName) {
     calc: parsed.calc,
     accountId: defaultAccountFor(parsed.source),
     batchId: Date.now(),
-    rows: records.map((rec) => ({
+    rows: records.map((rec, idx) => ({
       rec,
+      idx,   // rec 在 records 里的下标 —— 退款的 refundOfIdx 指的就是这个
       // 默认勾选（产品决策）：
       //   支付宝「账户存取」是自己账户间挪钱，既非收入也非支出 → 不勾
       //   已经导过 / 疑似重复 → 不勾，交给用户判断
@@ -1498,7 +1507,7 @@ function renderImportPick() {
 
     <div class="about-hero">
       <div class="about-logo">🧾</div>
-      <div class="about-name">导入微信 / 支付宝账单</div>
+      <div class="about-name">导入微信 / 支付宝 / 农行账单</div>
       <div class="about-slogan">一次把一个月记进来，不用一条条敲</div>
     </div>
 
@@ -1514,11 +1523,15 @@ function renderImportPick() {
       <div class="about-block">支付宝 → 我的 → 账单 → 右上角「…」→ 开具交易流水证明 → 选「用于个人对账」→ 填邮箱，收到邮件后把 <b>.csv</b> 存到手机。</div>
     </div></div>
 
+    <div class="set-group"><div class="set-title">农行怎么导出</div><div class="set-card">
+      <div class="about-block">农行 App → 首页「我的账户」→ 选那张卡 → 「交易明细」→ 选好起止日期 → 右上角「…」/「导出」→ 下载 <b>.pdf</b> 明细清单。<br><br>⚠️ 要<b>文字版 PDF</b>（能选中文字的那种）。截图或扫描件是用图片拼的，里面没有文字，解析不出来 —— 这种情况会直接报错，不会悄悄导成空账。<br><br>农行账单不带汇总行，App 改用它每行都有的「本次余额」逐行核对：上一条余额 + 本条金额 = 本条余额。有一行对不上就整份拒绝导入，并告诉你断在第几行。<br><br>💡 农行卡上的消费，支付宝账单里通常也有，两个都导会大量重复。App 会自动把重复行标成「疑似重复」并默认不勾，但要你逐条过一遍 —— <b>同一个月只导一边</b>更省事（银行是总账、什么都记，平台只知道该平台的）。</div>
+    </div></div>
+
     ${billError ? renderBillError() : ''}
     ${billLoading ? '<div class="empty">正在解析账单…</div>' : ''}
 
     <button class="primary-btn full" data-action="pick-bill">选择账单文件</button>
-    <div class="import-note">支持 .xlsx（微信）和 .csv（支付宝）</div>
+    <div class="import-note">支持 .xlsx（微信）、.csv（支付宝）、.pdf（农行）</div>
   </div>`;
 }
 
@@ -1545,6 +1558,15 @@ function renderImportReview() {
   });
   const effExpense = d.calc.expense.cents - refCents;
   const effIncome = d.calc.income.cents - refCents;
+  // 农行账单**没有**汇总行，核对方式完全不同，文案必须分开 ——
+  // 照搬「已与账单自带的汇总逐项核对一致」会让用户以为做了其实没做的事。
+  const isAbc = d.source === 'abc';
+  const reconText = isAbc
+    ? `✅ 已逐行核对余额连续性（${d.rows.length + d.skipped.length} 行全部对得上）`
+    : '✅ 已与账单自带的汇总逐项核对一致';
+  const skipText = d.skipped.length
+    ? (isAbc ? ` · 跳过 ${d.skipped.length} 条记不了账的行` : ` · 已剔除 ${d.skipped.length} 条不计收支`)
+    : '';
   const acctOptions = accounts.map((a) =>
     `<option value="${a.id}" ${d.accountId === a.id ? 'selected' : ''}>${escapeHtml(a.icon + ' ' + a.name)}</option>`).join('');
   return `
@@ -1561,10 +1583,9 @@ function renderImportReview() {
         <div><span>收入</span><b class="is-in">${fmtMoney(effIncome)}</b></div>
       </div>
       <div class="import-range">${escapeHtml(dates[0] || '')} ~ ${escapeHtml(dates[dates.length - 1] || '')}${
-        d.skipped.length ? ` · 已剔除 ${d.skipped.length} 条不计收支` : ''}${
-        d.encoding === 'gbk' ? ' · 编码 GBK 已自动识别' : ''}</div>
-      <div class="import-ok">✅ 已与账单自带的汇总逐项核对一致${
-        refCount ? `（账单口径：支出 ${fmtMoney(d.calc.expense.cents)} / 收入 ${fmtMoney(d.calc.income.cents)}）` : ''}</div>
+        skipText}${d.encoding === 'gbk' ? ' · 编码 GBK 已自动识别' : ''}</div>
+      <div class="import-ok">${reconText}${
+        refCount && !isAbc ? `（账单口径：支出 ${fmtMoney(d.calc.expense.cents)} / 收入 ${fmtMoney(d.calc.income.cents)}）` : ''}</div>
       ${refCount ? `<div class="import-range">含 ${refCount} 笔退款，按负数支出计入，已从支出中扣除</div>` : ''}
     </div></div>
 
@@ -1668,10 +1689,24 @@ async function commitBillImport() {
   if (!billDraft.accountId) { toast('请先选择账户'); return; }
 
   const batchId = billDraft.batchId;
-  const list = picked.map((r) => {
+  const list = [];
+  const idByRec = new Map();
+  picked.forEach((r) => {
     const t = toTxn(r.rec, { categoryId: r.categoryId, accountId: billDraft.accountId, batchId });
     t.id = uid();
-    return t;
+    list.push(t);
+    idByRec.set(r.idx, t.id);
+  });
+
+  // 把退款挂回它抵掉的那笔原支出。必须等 id 全部生成之后再回填：
+  // 解析阶段还没有 id 可用，记录里存的只是原支出在 records 里的下标。
+  //
+  // 用「records 下标 → 新 id」的表来换算，不能拿 picked 的下标去索引 list：
+  // 用户取消勾选某条时两者就错位了，会挂到别的记录上、甚至挂到自己身上。
+  // 原支出没被导入（被取消勾选）时找不到，就不挂 —— 那笔记录本身也不存在。
+  list.forEach((t, i) => {
+    const j = picked[i].rec.refundOfIdx;
+    if (typeof j === 'number' && idByRec.has(j)) t.refundOf = idByRec.get(j);
   });
 
   // 学习：把「商户 → 用户最终选的分类」记下来，下次导入优先于内置关键词。
@@ -1753,7 +1788,7 @@ function buildBillInput() {
   billInput = document.createElement('input');
   billInput.id = 'bill-file-input';
   billInput.type = 'file';
-  billInput.accept = '.xlsx,.xlsm,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv';
+  billInput.accept = '.xlsx,.xlsm,.csv,.pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,application/pdf';
   billInput.style.display = 'none';
   document.body.appendChild(billInput);
   billInput.addEventListener('change', () => {

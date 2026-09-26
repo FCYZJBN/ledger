@@ -1,6 +1,7 @@
 // 端到端冒烟测试：启动无头 Chrome + CDP，验证「渲染 → 记一笔 → 统计图表」全链路
 import { spawn } from 'node:child_process';
-import { WECHAT_XLSX, ALIPAY_CSV_GBK, ALIPAY_BAD_TOTAL_CSV_GBK } from './sample-bills.mjs';
+import zlib from 'node:zlib';
+import { WECHAT_XLSX, ALIPAY_CSV_GBK, ALIPAY_BAD_TOTAL_CSV_GBK, ABC_PDF_B64, ABC_PDF_BAD_B64 } from './sample-bills.mjs';
 
 const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
 const URL = process.env.SMOKE_URL || 'http://localhost:8001/';
@@ -405,6 +406,7 @@ async function main() {
     sumOut: (document.querySelector('.import-nums .is-out')||{}).textContent || '',
     sumIn: (document.querySelector('.import-nums .is-in')||{}).textContent || '',
     range: (document.querySelector('.import-range')||{}).textContent || '',
+    okText: ((document.querySelector('.import-ok')||{}).textContent||'').replace(/\\s+/g,' ').trim(),
     foot: ((document.querySelector('.bill-foot-nums')||{}).textContent||'').replace(/\\s+/g,' ').trim(),
     commit: (document.querySelector('[data-action="bill-commit"]')||{}).textContent || '',
     tags: [...document.querySelectorAll('.bill-tag')].map((x) => x.textContent),
@@ -745,10 +747,193 @@ async function main() {
   })()`));
   // negative 为 3、zeroed 为 0：三笔退款（手记 -100、导入 -20、关联的 -30）都得活着回来。
   // 若 Math.max(0,...) 还在，这里会变成 negative:0 / zeroed:3 —— 正好被抓住。
+  //
+  // linked 是 2 不是 1：以前只有手记那条关联了原支出，**从账单导入的退款是断链的**
+  // （toTxn 根本不产出 refundOf）。现在两条路径都挂上了，这条顺带钉住了那个缺口。
   results.push(['退款·备份往返保负金额与关联',
     restored.negative === 3 && restored.zeroed === 0
     && [-10000, -2000, -3000].every((v) => restored.amounts.includes(v))
-    && restored.linked === 1 && restored.linkAlive && !restored.selfLink, restored]);
+    && restored.linked === 2 && restored.linkAlive && !restored.selfLink, restored]);
+
+  // ============ 农行 PDF 导入 ============
+  // 农行是 PDF，而且**没有汇总行** —— 前两条来源那种「账单自证」的路走不通，
+  // 改用它每行都带的「本次余额」逐行核对（上一条余额 + 本条金额 = 本条余额）。
+  // 样本与真实文件结构同构（手写 Type0/Identity-H + ToUnicode，见 sample-bills.mjs）。
+
+  const ABC_MIME = 'application/pdf';
+  const ABC_NAME = '农业银行交易明细清单.pdf';
+  const readBillRows = async () => JSON.parse(await evalJs(`JSON.stringify(
+    [...document.querySelectorAll('.bill-row')].map((row) => ({
+      party: ((row.querySelector('.bill-party') || {}).textContent || ''),
+      checked: !!((row.querySelector('.bill-check') || {}).checked),
+      tags: [...row.querySelectorAll('.bill-tag')].map((x) => x.textContent),
+    }))
+  )`));
+
+  // 坏样本先跑：余额改了 0.01 就必须整份拒绝，并说清断在第几行。
+  // 这里必须 reloadApp 而不是 resetImport：上一个用例（备份往返）把应用留下了
+  // 「设置」页，而 resetImport 只在「待确认」页找得到 bill-reset 按钮，找不到就
+  // 静默什么都不做 —— 于是文件注进去了、渲染的却还是设置页，断言全空。
+  await reloadApp();
+  await injectBill(ABC_PDF_BAD_B64, ABC_NAME, ABC_MIME);
+  await sleep(900);
+  const abcBad = await readReview();
+  results.push(['账单·农行余额闸门拒绝错账',
+    abcBad.errShown && !abcBad.onReview
+    && abcBad.errText.includes('已拒绝导入') && abcBad.errText.includes('余额对不上')
+    && abcBad.errText.includes('第 4 行'), abcBad]);
+
+  // 先种一条「别的来源导进来的」记录：它与样本里 2026-01-09 那两笔同日同额同方向。
+  // 跨来源去重必须有东西可撞，否则这条断言永远是绿的。
+  await addManual([{ id: 'seed-ali-1', type: 'expense', amount: 1234, categoryId: '',
+    accountId: '', date: '2026-01-09', note: '别的来源导进来的', billNo: 'ali:2026010912345678',
+    createdAt: Date.now(), updatedAt: Date.now() }]);
+  await reloadApp();
+  await injectBill(ABC_PDF_B64, ABC_NAME, ABC_MIME);
+  await waitFor(`!!document.querySelector('#bill-rows')`);
+  const abc = await readReview();
+  const abcRows = await readBillRows();
+  const rowOf = (kw) => abcRows.find((r) => r.party.includes(kw)) || { party: '（没找到）', tags: [], checked: null };
+
+  // 26. 解析：10 条记录、1 条 0 元（利息税）被跳过、余额逐行核对通过。
+  //     注意对账文案在 .import-ok 里，不在 .import-range 里（.import-range 只放
+  //     日期范围与跳过条数），所以这里读 okText。
+  results.push(['账单·农行PDF解析', abc.onReview && abc.rows === 10
+    && abc.range.includes('跳过 1 条') && abc.range.includes('2026-01-01')
+    && abc.okText.includes('余额连续性'), abc]);
+
+  // 27. 折行合并：对手信息与交易附言各折成两段，要接回同一格
+  results.push(['账单·农行折行合并',
+    rowOf('模拟长名字商户前半段').party === '模拟长名字商户前半段甲',
+    abcRows.map((r) => r.party)]);
+
+  // 28. 内部挪钱默认不勾：小荷包、抖音提现入账都是自己账户之间挪钱
+  results.push(['账单·农行内部转账默认不勾',
+    rowOf('模拟商户甲').checked === false && rowOf('模拟商户甲').tags.some((t) => t.includes('账户挪动'))
+    && rowOf('模拟平台甲').checked === false && rowOf('模拟平台甲').tags.some((t) => t.includes('账户挪动')),
+    { a: rowOf('模拟商户甲'), b: rowOf('模拟平台甲') }]);
+
+  // 29. 他人转入默认勾选并打标记；「转支」必须保持普通支出。
+  //     转支那笔是付给公交卡的消费，误判成转账会默认不勾 → 用户静默少记一笔支出。
+  results.push(['账单·农行他人转入默认勾选',
+    rowOf('模拟人名甲').checked === true && rowOf('模拟人名甲').tags.some((t) => t.includes('转账/红包'))
+    && rowOf('模拟公交卡').checked === true && !rowOf('模拟公交卡').tags.some((t) => t.includes('转账/红包')),
+    { p2p: rowOf('模拟人名甲'), zhizhi: rowOf('模拟公交卡') }]);
+
+  // 30. 跨来源重复默认不勾：种子那笔 ali: 记录与两笔「模拟商店乙」同日同额，
+  //     组内配额是 1，所以只能标掉一条，另一条必须照勾（是配额对账，不是朴素匹配）
+  const yi = abcRows.filter((r) => r.party.includes('模拟商店乙'));
+  results.push(['账单·跨来源重复默认不勾',
+    yi.length === 2 && yi.filter((r) => r.tags.some((t) => t.includes('疑似重复'))).length === 1
+    && yi.filter((r) => r.checked === false).length === 1,
+    yi]);
+
+  // 31. 退款：农行账单里没有任何「退款」字样，只能靠「金额相同方向相反、对手完全一致」反推
+  const refRow = abcRows.filter((r) => r.tags.some((t) => t.includes('退款')));
+  results.push(['账单·农行退款自动识别',
+    refRow.length === 1 && refRow[0].party.includes('模拟商店甲')
+    && refRow[0].checked === true && abc.checked === 7,
+    { refund: refRow, checked: abc.checked, off: abc.offRows }]);
+
+  // 入库：7 条（10 条减去 2 条内部挪钱 —— 小荷包 + 抖音提现 —— 再减去 1 条疑似重复）
+  const n2 = (await readTxns()).length;
+  await evalJs(`document.querySelector('[data-action="bill-commit"]').click()`);
+  await sleep(1500);
+  const abcAll = await readTxns();
+  const abcTxns = abcAll.filter((t) => t.billNo && t.billNo.startsWith('abc:'));
+  const abcNeg = abcTxns.filter((t) => t.amount < 0);
+  const abcIds = new Set(abcAll.map((t) => t.id));
+  const abcSrc = abcAll.find((t) => t.id === (abcNeg[0] || {}).refundOf);
+
+  results.push(['账单·农行入库与退款关联原支出',
+    abcTxns.length === 7 && abcAll.length === n2 + 7
+    && abcNeg.length === 1 && abcNeg[0].type === 'expense' && abcNeg[0].amount === -2000
+    && !!abcNeg[0].refundOf && abcIds.has(abcNeg[0].refundOf)
+    && !!abcSrc && abcSrc.amount === 2000 && abcSrc.billNo.startsWith('abc:'),
+    { imported: abcTxns.length, total: abcAll.length, before: n2,
+      refund: abcNeg.map((t) => ({ amount: t.amount, linked: !!t.refundOf })),
+      src: abcSrc && { amount: abcSrc.amount } }]);
+
+  // 原支出那一行要显示「已全额退款」—— 账单导入的退款以前是断链的，标记根本不出来
+  await evalJs(`[...document.querySelectorAll('.tab')].find((b) => b.dataset.tab === 'list').click()`);
+  await sleep(400);
+  // 样本日期是 2026-01 月，默认月份筛选看不到，先切到「全部」
+  await evalJs(`(() => { const s = document.querySelector('#f-month'); if (s) { s.value = 'all'; s.dispatchEvent(new Event('change', { bubbles: true })); } })()`);
+  await sleep(400);
+  const abcBadge = await evalJs(`(() => {
+    const row = document.querySelector('.txn[data-id="${abcSrc && abcSrc.id}"]');
+    const t = row && row.querySelector('.txn-tag');
+    return t ? t.textContent.trim() : '';
+  })()`);
+  results.push(['账单·农行退款原支出显示已全额退款',
+    String(abcBadge).includes('已全额退款'), { badge: abcBadge }]);
+
+  await evalJs(`[...document.querySelectorAll('#modal-foot button')].find((b) => b.textContent.trim() === '好').click()`);
+  await sleep(400);
+
+  // 32. 导入的退款（微信）也要带 refundOf —— 这条专门钉住本次修的缺口。
+  //     用第 19 项导进来的那批微信记录：以前它们的退款是断链的。
+  const wxNow = await readTxns();
+  const wxRefund = wxNow.filter((t) => t.billNo && t.billNo.startsWith('wx:') && t.amount < 0);
+  const wxIds = new Set(wxNow.map((t) => t.id));
+  results.push(['退款·导入的退款带 refundOf（微信）',
+    wxRefund.length === 1 && !!wxRefund[0].refundOf && wxIds.has(wxRefund[0].refundOf),
+    { refund: wxRefund.map((t) => ({ amount: t.amount, linked: !!t.refundOf })) }]);
+
+  // 33. billNo 白名单：备份往返一趟，abc: 前缀不能被静默剥掉。
+  //     VALID_BILL_NO 是白名单，漏加前缀不会报任何错 ——
+  //     导出正常、恢复之后去重失效，是最难发现的那种坏。
+  await evalJs(`(async () => {
+    const db = await new Promise((res, rej) => { const r = indexedDB.open('ledger-db', 1); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+    const get = (s) => new Promise((res, rej) => { const r = db.transaction(s, 'readonly').objectStore(s).getAll(); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+    const cats = await get('categories'), accts = await get('accounts'), txns = await get('transactions');
+    db.close();
+    const dt = new DataTransfer();
+    dt.items.add(new File([JSON.stringify({ app: '记账本', version: 1, categories: cats, accounts: accts, transactions: txns })], 'backup2.json', { type: 'application/json' }));
+    const inp = document.querySelector('#import-json-input');
+    inp.files = dt.files;
+    inp.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await sleep(700);
+  await evalJs(`document.querySelector('#modal-foot .danger-btn').click()`);
+  await sleep(1200);
+  const abcAfterRestore = (await readTxns()).filter((t) => t.billNo);
+  const abcKeep = abcAfterRestore.filter((t) => t.billNo.startsWith('abc:'));
+  results.push(['账单·农行billNo过备份往返',
+    abcKeep.length === 7 && abcAfterRestore.every((t) => /^(wx|ali|abc):/.test(t.billNo)),
+    { abc: abcKeep.length, prefixes: [...new Set(abcAfterRestore.map((t) => t.billNo.split(':')[0]))],
+      sample: abcKeep[0] && abcKeep[0].billNo }]);
+
+  // 34. 解压炸弹：畸形 / 损坏的 PDF 不能把标签页拖死。
+  //     gzip 炸弹是这类解析器的经典坑 —— 几 KB 输入能膨出几十 GB，而
+  //     `arrayBuffer()` 是先把内容全吃完才返回的，也就是先 OOM 再报错，
+  //     连错误都报不出来。所以解压必须边读边数、超限即断。
+  //     这份样本在运行时用 zlib 现造（70MB 的 0 压完只有几十 KB），
+  //     不往 sample-bills.mjs 里塞近 100KB 的 base64。
+  const bombB64 = (() => {
+    const z = zlib.deflateSync(Buffer.alloc(70 * 1024 * 1024));
+    const head = ['<< /Type /Catalog /Pages 2 0 R >>',
+      '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+      '<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << >> /MediaBox [0 0 595 842] >>'];
+    let s = '%PDF-1.4\n';
+    head.forEach((b, i) => { s += `${i + 1} 0 obj\n${b}\nendobj\n`; });
+    const four = s.length;
+    s += `4 0 obj\n<< /Filter /FlateDecode /Length ${z.length} >>\nstream\n`;
+    const buf = Buffer.concat([
+      Buffer.from(s, 'latin1'), z, Buffer.from('\nendstream\nendobj\n', 'latin1'),
+    ]);
+    const xref = buf.length;
+    const tail = `xref\n0 5\n0000000000 65535 f \n`
+      + head.map((_, i) => `${String(i === 3 ? four : 0).padStart(10, '0')} 00000 n \n`).join('')
+      + `trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+    return Buffer.concat([buf, Buffer.from(tail, 'latin1')]).toString('base64');
+  })();
+  await reloadApp();
+  await injectBill(bombB64, '解压炸弹.pdf', 'application/pdf');
+  await sleep(2500);
+  const bombRes = await readReview();
+  results.push(['账单·农行解压炸弹不拖死页面',
+    bombRes.errShown && !bombRes.onReview && bombRes.errText.includes('64MB'), bombRes]);
 
   // ============ Service Worker / 离线 ============
   // 这两项必须放最后：断网用例会导航重载页面，前面用过的一切页内状态都会没。
@@ -785,12 +970,51 @@ async function main() {
       cacheNames: names, cacheCount: urls.length,
       hasApp: urls.some((u) => u.endsWith('/js/app.js')),
       hasBill: urls.some((u) => u.endsWith('/js/bill.js')),
+      // bill.js 会 import pdf.js：它没进缓存的话，离线时农行那条导入路径会白屏
+      hasPdf: urls.some((u) => u.endsWith('/js/pdf.js')),
       hasRoot: urls.some((u) => u.endsWith('/ledger/') || u.endsWith('index.html')),
+      // 缓存里出现过的 js/css。注意这**不能**直接当成「预缓存清单」来断言：
+      // sw.js 的 fetch 处理器会把任何取到的东西都 put 进缓存，所以这些 URL 里
+      // 混着「预缓存进去的」和「运行时顺手缓存下来的」。要断言预缓存清单，
+      // 得去看 sw.js 里的 ASSETS 本身 —— 见下面 unprecached 的算法。
+      modUrls: urls.filter((u) => /\.(js|css)$/.test(new URL(u).pathname)).map((u) => new URL(u).pathname),
     };
   })()`);
+
+  // 预缓存清单必须覆盖「应用真的加载了的所有 js/css」。
+  // 为什么非要单独查这个：`hasPdf` 那种「缓存里有没有」的断言是**假绿**——
+  // 哪怕漏把 pdf.js 写进 ASSETS，只要导入过一次 PDF，运行时缓存就会把它塞进去，
+  // 断言照样过（这条是实测出来的：把 pdf.js 从 ASSETS 删掉，hasPdf 仍然是 true）。
+  // 但运行时缓存只在「先联网访问过」时救得了你，冷启动离线是救不了的 ——
+  // 而那正是 PWA 存在的理由。所以这里直接对 ASSETS 清单本身断言，
+  // 并且拿「实际加载过的模块」当输入，以后再加 icbc.js 忘了登记也会当场红。
+  let unprecached = [];
+  let assetsCount = -1;
+  // 注意：本文件顶部的 `URL` 是页面地址字符串，把全局的 URL 构造函数挡住了 ——
+  // 这里必须走 globalThis.URL，否则报 "URL is not a constructor"。
+  const U = globalThis.URL;
+  try {
+    const swText = await (await fetch(new U('sw.js', URL))).text();
+    const block = swText.match(/const\s+ASSETS\s*=\s*\[([\s\S]*?)\]/);
+    if (block) {
+      const assets = new Set(
+        [...block[1].matchAll(/'([^']+)'/g)].map((m) => new U(m[1], URL).pathname)
+      );
+      assetsCount = assets.size;
+      unprecached = (swInfo.modUrls || [])
+        .filter((p) => p !== new U('sw.js', URL).pathname && !assets.has(p));
+    }
+  } catch (e) { unprecached = ['读取 sw.js 失败：' + e.message]; }
+
   results.push(['离线·SW 注册并接管',
     !!swInfo && swInfo.api && swInfo.regs >= 1 && swInfo.controller && swInfo.ready
-    && swInfo.cacheCount > 0 && swInfo.hasApp && swInfo.hasBill && swInfo.hasRoot, swInfo]);
+    && swInfo.cacheCount > 0 && swInfo.hasApp && swInfo.hasBill && swInfo.hasRoot
+    && swInfo.hasPdf, swInfo]);
+
+  // 24b. 预缓存清单覆盖性（含未来新增模块）
+  results.push(['离线·预缓存清单覆盖全部已加载模块',
+    assetsCount > 0 && unprecached.length === 0,
+    { assetsCount, unprecached, modCount: (swInfo.modUrls || []).length }]);
 
   // 25. 真·断网重载。
   //     必须先 clearBrowserCache：Chrome 的普通 HTTP 缓存会把页面顶上来，
